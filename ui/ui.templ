@@ -28,18 +28,18 @@ type FormField struct {
 	Key       string
 	Label     string
 	Type      string
-	HelpHTML  string // rendered Markdown (safe HTML), shown below the input
+	HelpHTML  string
 	Required  bool
 	MaxLength int
 	Options   []string
 	Value     string
-	Error     string // server-side validation message, shown inline at the field
+	Error     string
 }
 
 type FormView struct {
 	AppName         string
 	Title           string
-	DescriptionHTML string // rendered Markdown (safe HTML)
+	DescriptionHTML string
 	Error           string
 	TimeToken       string
 	Fields          []FormField
