@@ -1,0 +1,12 @@
+{
+  "name": "surveys-ui",
+  "private": true,
+  "description": "Tailwind+DaisyUI build for the surveys frontend (self-hosted, no CDN)",
+  "scripts": {
+    "build:css": "tailwindcss -i ./assets/input.css -o ./assets/app.css --minify"
+  },
+  "devDependencies": {
+    "daisyui": "^4.12.14",
+    "tailwindcss": "^3.4.14"
+  }
+}

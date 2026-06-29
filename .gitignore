@@ -1,0 +1,9 @@
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+surveys
+assets/app.css
+node_modules/
+ui/*_templ.txt

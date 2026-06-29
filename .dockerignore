@@ -1,0 +1,10 @@
+node_modules/
+assets/app.css
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+deploy/
+README.md
+*_test.go

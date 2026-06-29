@@ -1,0 +1,533 @@
+package ui
+
+
+type SurveyRow struct {
+	Title       string
+	OwnerTeam   string
+	Status      string
+	URL         string
+	Submissions int
+}
+
+type ClientRow struct {
+	ID       string
+	Name     string
+	LastSeen string
+}
+
+type DashboardData struct {
+	AppName  string
+	UserName string
+	MCPUrl   string
+	Teams    string
+	Surveys  []SurveyRow
+	Clients  []ClientRow
+}
+
+type FormField struct {
+	Key       string
+	Label     string
+	Type      string
+	HelpHTML  string // rendered Markdown (safe HTML), shown below the input
+	Required  bool
+	MaxLength int
+	Options   []string
+	Value     string
+	Error     string // server-side validation message, shown inline at the field
+}
+
+type FormView struct {
+	AppName         string
+	Title           string
+	DescriptionHTML string // rendered Markdown (safe HTML)
+	Error           string
+	TimeToken       string
+	Fields          []FormField
+}
+
+type ConsentData struct {
+	AppName    string
+	ClientName string
+	AuthzID    string
+	Scope      string
+}
+
+templ Layout(title string) {
+	<!doctype html>
+	<html lang="de" data-theme={ Theme }>
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width,initial-scale=1"/>
+			<meta name="robots" content="noindex,nofollow"/>
+			<title>{ title }</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+		</head>
+		<body class="min-h-screen bg-base-200 text-base-content">
+			{ children... }
+			<script>
+				function copyMcp(){
+					const el = document.getElementById('mcpurl');
+					if (el) navigator.clipboard.writeText(el.textContent.trim());
+				}
+			</script>
+		</body>
+	</html>
+}
+
+templ navbar(appName, userName string) {
+	<div class="navbar bg-base-100 border-b border-base-300">
+		<div class="flex-1 px-2 font-semibold text-lg">{ appName }</div>
+		<div class="flex-none gap-2 items-center text-sm">
+			<span class="opacity-70">{ userName }</span>
+			<a class="btn btn-ghost btn-sm" href="/logout">Abmelden</a>
+		</div>
+	</div>
+}
+
+templ Landing(appName string) {
+	@Layout(appName) {
+		<main class="hero min-h-screen">
+			<div class="hero-content text-center">
+				<div class="max-w-md">
+					<h1 class="text-3xl font-bold">{ appName }</h1>
+					<p class="py-4 opacity-70">
+						Formulare und Umfragen sammeln. Anlegen und Auswerten per KI (MCP);
+						öffentliche Formulare sind nur über ihren persönlichen Link erreichbar.
+					</p>
+					<div class="flex gap-2 justify-center">
+						<a class="btn btn-primary" href="/login/start?next=/">Anmelden</a>
+						<a class="btn btn-ghost" href="/docs">Dokumentation</a>
+					</div>
+				</div>
+			</div>
+		</main>
+	}
+}
+
+templ Login(appName, startHref string) {
+	@Layout("Anmelden") {
+		<main class="hero min-h-screen">
+			<div class="hero-content">
+				<div class="card w-96 bg-base-100 shadow-md">
+					<div class="card-body items-center text-center">
+						<h1 class="card-title">Anmelden</h1>
+						<p class="opacity-70">Bitte anmelden, um fortzufahren.</p>
+						<a class="btn btn-primary mt-2" href={ templ.SafeURL(startHref) }>Anmelden</a>
+					</div>
+				</div>
+			</div>
+		</main>
+	}
+}
+
+templ Consent(c ConsentData) {
+	@Layout("Zugriff erlauben") {
+		<main class="hero min-h-screen">
+			<div class="hero-content">
+				<div class="card w-[28rem] max-w-full bg-base-100 shadow-md">
+					<div class="card-body">
+						<h1 class="card-title">Zugriff erlauben?</h1>
+						<p>
+							<span class="font-semibold">{ c.ClientName }</span>
+							möchte als KI-Client auf deine Umfragen zugreifen.
+						</p>
+						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine Teams)</div>
+						<div class="card-actions justify-end mt-4">
+							<form method="post" action="/oauth/deny">
+								<input type="hidden" name="authz_id" value={ c.AuthzID }/>
+								<button class="btn btn-ghost" type="submit">Ablehnen</button>
+							</form>
+							<form method="post" action="/oauth/approve">
+								<input type="hidden" name="authz_id" value={ c.AuthzID }/>
+								<button class="btn btn-primary" type="submit">Erlauben</button>
+							</form>
+						</div>
+					</div>
+				</div>
+			</div>
+		</main>
+	}
+}
+
+templ Dashboard(d DashboardData) {
+	@Layout(d.AppName) {
+		@navbar(d.AppName, d.UserName)
+		<main class="max-w-3xl mx-auto p-4 md:p-6 space-y-6">
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<div class="flex items-center justify-between">
+						<h2 class="card-title text-base">KI-Connector (MCP)</h2>
+						<a class="link link-primary text-sm" href="/docs">Dokumentation →</a>
+					</div>
+					<p class="text-sm opacity-70">In claude.ai als Connector hinzufügen, dann z. B.: „Leg eine neue Umfrage für Team … an."</p>
+					<div class="join w-full mt-2">
+						<input id="mcpurl" class="input input-bordered join-item w-full font-mono text-sm" readonly value={ d.MCPUrl }/>
+						<button class="btn btn-primary join-item" type="button" onclick="copyMcp()">Kopieren</button>
+					</div>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<div class="flex items-center justify-between">
+						<h2 class="card-title text-base">Deine Umfragen</h2>
+					</div>
+					if len(d.Surveys) == 0 {
+						<div class="alert mt-2">
+							<span>Noch keine Umfragen für deine Teams ({ d.Teams }). Leg die erste per KI an (Connector oben).</span>
+						</div>
+					} else {
+						<div class="overflow-x-auto">
+							<table class="table table-zebra">
+								<thead>
+									<tr><th>Titel</th><th>Team</th><th>Status</th><th>Einsend.</th><th>Link</th></tr>
+								</thead>
+								<tbody>
+									for _, s := range d.Surveys {
+										<tr>
+											<td class="font-medium">{ s.Title }</td>
+											<td><span class="badge badge-ghost">{ s.OwnerTeam }</span></td>
+											<td>
+												if s.Status == "disabled" {
+													<span class="badge badge-error badge-outline">deaktiviert</span>
+												} else {
+													<span class="badge badge-success badge-outline">aktiv</span>
+												}
+											</td>
+											<td>{ itoa(s.Submissions) }</td>
+											<td><a class="link link-primary text-sm break-all" href={ templ.SafeURL(s.URL) } target="_blank" rel="noopener">{ s.URL }</a></td>
+										</tr>
+									}
+								</tbody>
+							</table>
+						</div>
+					}
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">Verbundene KI-Clients</h2>
+					if len(d.Clients) == 0 {
+						<p class="text-sm opacity-70">Keine aktiven Verbindungen.</p>
+					} else {
+						<div class="overflow-x-auto">
+							<table class="table">
+								<thead><tr><th>Client</th><th>Zuletzt aktiv</th><th></th></tr></thead>
+								<tbody>
+									for _, c := range d.Clients {
+										<tr>
+											<td>{ c.Name }</td>
+											<td class="text-sm opacity-70">{ c.LastSeen }</td>
+											<td class="text-right">
+												<form method="post" action="/revoke">
+													<input type="hidden" name="client_id" value={ c.ID }/>
+													<button class="btn btn-error btn-xs btn-outline" type="submit">Widerrufen</button>
+												</form>
+											</td>
+										</tr>
+									}
+								</tbody>
+							</table>
+						</div>
+					}
+				</div>
+			</section>
+		</main>
+	}
+}
+
+templ FormPage(f FormView) {
+	@Layout(f.Title) {
+		<main class="max-w-xl mx-auto p-4 md:p-6">
+			<div class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h1 class="card-title text-xl">{ f.Title }</h1>
+					if f.DescriptionHTML != "" {
+						<div class="md opacity-80 mt-1">
+							@templ.Raw(f.DescriptionHTML)
+						</div>
+					}
+					if f.Error != "" {
+						<div class="alert alert-error text-sm"><span>{ f.Error }</span></div>
+					}
+					<form id="surveyform" method="post" autocomplete="off" class="space-y-3">
+						<div class="absolute -left-[9999px]" aria-hidden="true">
+							<label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"/></label>
+						</div>
+						<input type="hidden" name="t" value={ f.TimeToken }/>
+						for _, fld := range f.Fields {
+							@field(fld)
+						}
+						<button type="submit" class="btn btn-primary w-full">Absenden</button>
+					</form>
+				</div>
+			</div>
+		</main>
+		@formValidation()
+	}
+}
+
+templ field(f FormField) {
+	<div class="form-control">
+		<label class="label">
+			<span class="label-text font-medium">
+				{ f.Label }
+				if f.Required {
+					<span class="text-error">*</span>
+				}
+			</span>
+		</label>
+		switch f.Type {
+			case "textarea":
+				<textarea name={ f.Key } class={ "textarea textarea-bordered", templ.KV("textarea-error", f.Error != "") } required?={ f.Required } rows="4" { optAttrs(f)... }>{ f.Value }</textarea>
+			case "select":
+				<select name={ f.Key } class={ "select select-bordered", templ.KV("select-error", f.Error != "") } required?={ f.Required }>
+					<option value="" disabled?={ f.Required } selected?={ f.Value == "" }>– bitte wählen –</option>
+					for _, o := range f.Options {
+						<option value={ o } selected?={ o == f.Value }>{ o }</option>
+					}
+				</select>
+			case "radio":
+				<div class="flex flex-col gap-1">
+					for _, o := range f.Options {
+						<label class="label cursor-pointer justify-start gap-2">
+							<input type="radio" name={ f.Key } value={ o } class="radio radio-sm" required?={ f.Required } checked?={ o == f.Value }/>
+							<span class="label-text">{ o }</span>
+						</label>
+					}
+				</div>
+			case "checkbox":
+				<input type="checkbox" name={ f.Key } value="on" class={ "checkbox", templ.KV("checkbox-error", f.Error != "") } required?={ f.Required } checked?={ f.Value == "true" }/>
+			case "number":
+				<input type="number" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } inputmode="decimal"/>
+			case "email":
+				<input type="email" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } inputmode="email" autocapitalize="off" autocorrect="off" { optAttrs(f)... }/>
+			default:
+				<input type="text" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } { optAttrs(f)... }/>
+		}
+		<p data-error-for={ f.Key } class={ "text-error text-sm mt-1", templ.KV("hidden", f.Error == "") }>
+			if f.Error != "" {
+				{ f.Error }
+			}
+		</p>
+		if f.HelpHTML != "" {
+			<div class="md text-sm opacity-70 mt-1">
+				@templ.Raw(f.HelpHTML)
+			</div>
+		}
+	</div>
+}
+
+templ formValidation() {
+	<script>
+		(function () {
+			var form = document.getElementById('surveyform');
+			if (!form) return;
+
+			function slotFor(el) {
+				return form.querySelector('[data-error-for="' + el.name + '"]');
+			}
+			function errorClass(el) {
+				var t = (el.tagName || '').toLowerCase();
+				if (t === 'textarea') return 'textarea-error';
+				if (t === 'select') return 'select-error';
+				if (el.type === 'checkbox' || el.type === 'radio') return 'checkbox-error';
+				return 'input-error';
+			}
+			function message(el) {
+				var v = el.validity;
+				if (v.valueMissing) return 'Dieses Feld ist erforderlich.';
+				if (el.type === 'email' && v.typeMismatch) return 'Bitte geben Sie eine gültige E-Mail-Adresse ein.';
+				if (v.typeMismatch) return 'Die Eingabe hat das falsche Format.';
+				if (v.tooLong) return 'Bitte kürzen Sie die Eingabe (max. ' + el.maxLength + ' Zeichen).';
+				if (v.badInput) return 'Bitte geben Sie eine gültige Zahl ein.';
+				if (v.rangeOverflow || v.rangeUnderflow) return 'Der Wert liegt außerhalb des erlaubten Bereichs.';
+				if (v.patternMismatch) return 'Die Eingabe hat das falsche Format.';
+				return el.validationMessage || 'Ungültige Eingabe.';
+			}
+			function show(el) {
+				var slot = slotFor(el);
+				el.classList.add(errorClass(el));
+				if (slot) { slot.textContent = message(el); slot.classList.remove('hidden'); }
+			}
+			function clear(el) {
+				var slot = slotFor(el);
+				el.classList.remove('input-error', 'textarea-error', 'select-error', 'checkbox-error');
+				if (slot) { slot.textContent = ''; slot.classList.add('hidden'); }
+			}
+
+			Array.prototype.forEach.call(form.elements, function (el) {
+				if (!el.name || el.name === 'website' || el.name === 't') return;
+				el.addEventListener('invalid', function (e) { e.preventDefault(); show(el); });
+				el.addEventListener('input', function () { if (el.checkValidity()) clear(el); });
+				el.addEventListener('change', function () { if (el.checkValidity()) clear(el); });
+				el.addEventListener('blur', function () { if (el.value && !el.checkValidity()) show(el); });
+			});
+			form.addEventListener('submit', function (e) {
+				if (!form.checkValidity()) {
+					e.preventDefault();
+					var first = form.querySelector(':invalid');
+					if (first) first.focus();
+				}
+			});
+		})();
+	</script>
+}
+
+templ Confirm(appName string) {
+	@Layout("Vielen Dank") {
+		<main class="hero min-h-screen">
+			<div class="hero-content text-center">
+				<div class="max-w-md">
+					<div class="text-5xl text-success">✓</div>
+					<h1 class="text-2xl font-bold mt-2">Vielen Dank!</h1>
+					<p class="opacity-70">Ihre Angaben wurden gespeichert.</p>
+				</div>
+			</div>
+		</main>
+	}
+}
+
+templ Notice(appName, heading, message string) {
+	@Layout(heading) {
+		<main class="hero min-h-screen">
+			<div class="hero-content text-center">
+				<div class="max-w-md">
+					<h1 class="text-2xl font-bold">{ heading }</h1>
+					<p class="opacity-70 mt-2">{ message }</p>
+				</div>
+			</div>
+		</main>
+	}
+}
+
+type docField struct {
+	Type string
+	Desc string
+}
+
+func fieldTypeRows() []docField {
+	return []docField{
+		{"text", "Einzeilige Texteingabe (Name, Ort, …)."},
+		{"textarea", "Mehrzeiliger Freitext (Beschreibung, Begründung)."},
+		{"email", "E-Mail-Adresse; wird auf gültiges Format geprüft."},
+		{"number", "Zahl (ganz oder dezimal)."},
+		{"select", "Auswahl aus einer Liste (Dropdown). Braucht options."},
+		{"radio", "Auswahl aus einer Liste (Optionsfelder). Braucht options."},
+		{"checkbox", "Ja/Nein-Häkchen. Als required = Pflicht-Zustimmung."},
+	}
+}
+
+templ Docs(appName, mcpURL string) {
+	@Layout("Dokumentation – " + appName) {
+		<main class="max-w-3xl mx-auto p-4 md:p-6 space-y-6">
+			<div class="flex items-center justify-between">
+				<h1 class="text-2xl font-bold">Dokumentation</h1>
+				<a class="btn btn-ghost btn-sm" href="/">Zurück</a>
+			</div>
+			<p class="opacity-70">
+				{ appName } ist ein schlanker, selbst-gehosteter Dienst zum Sammeln von
+				Formular-Angaben. Es gibt genau zwei Oberflächen: öffentliche HTML-Formulare
+				und einen MCP-Endpunkt, über den eine KI (z. B. Claude) Umfragen anlegt und
+				Ergebnisse ausliest. Keine REST-API, kein klassisches Admin-Backend.
+			</p>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">1. KI-Connector (MCP) einrichten</h2>
+					<p class="text-sm opacity-70">Diese URL in claude.ai unter „Connectors" → „Add custom connector" eintragen:</p>
+					<div class="join w-full mt-1">
+						<input id="mcpurl" class="input input-bordered join-item w-full font-mono text-sm" readonly value={ mcpURL }/>
+						<button class="btn btn-primary join-item" type="button" onclick="copyMcp()">Kopieren</button>
+					</div>
+					<p class="text-sm opacity-70 mt-2">
+						Beim ersten Zugriff leitet der Dienst zur Anmeldung (GitHub) weiter und
+						fragt deine Zustimmung ab. Danach kannst du in normaler Sprache arbeiten,
+						z. B.:
+					</p>
+					<ul class="text-sm list-disc pl-5 space-y-1">
+						<li>„Leg eine Umfrage für Team <em>… </em> an mit den Feldern Name, Beruf und einem Freitext."</li>
+						<li>„Zeig mir die Einsendungen von Umfrage … als Tabelle."</li>
+						<li>„Exportiere die Antworten als CSV."</li>
+						<li>„Deaktiviere die Umfrage …"</li>
+					</ul>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">2. Feldtypen</h2>
+					<div class="overflow-x-auto">
+						<table class="table table-sm">
+							<thead><tr><th>type</th><th>Beschreibung</th></tr></thead>
+							<tbody>
+								for _, r := range fieldTypeRows() {
+									<tr><td class="font-mono">{ r.Type }</td><td class="text-sm">{ r.Desc }</td></tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">3. Eigenschaften pro Feld</h2>
+					<ul class="text-sm space-y-1">
+						<li><span class="font-mono">label</span> — die sichtbare Beschriftung (Pflicht).</li>
+						<li><span class="font-mono">key</span> — technischer Schlüssel, nur <span class="font-mono">a–z 0–9 _</span> (Pflicht, eindeutig).</li>
+						<li><span class="font-mono">type</span> — einer der Typen aus Abschnitt 2 (Pflicht).</li>
+						<li><span class="font-mono">required</span> — Pflichtfeld ja/nein.</li>
+						<li><span class="font-mono">help</span> — Hinweistext unter dem Feld. <strong>Markdown wird unterstützt</strong> (siehe Abschnitt 4).</li>
+						<li><span class="font-mono">max_length</span> — maximale Zeichenzahl (Text/Textarea/E-Mail).</li>
+						<li><span class="font-mono">options</span> — Liste der Auswahlmöglichkeiten (nur select/radio).</li>
+					</ul>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">4. Markdown in Beschreibung & Hilfetexten</h2>
+					<p class="text-sm opacity-70">
+						Die Umfrage-Beschreibung und der <span class="font-mono">help</span>-Text
+						jedes Feldes verstehen Markdown: <strong>**fett**</strong>,
+						<em>*kursiv*</em>, Listen, Überschriften und Links
+						(<span class="font-mono">[Text](https://…)</span>). Reines HTML wird aus
+						Sicherheitsgründen nicht ausgeführt.
+					</p>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">5. Eigenschaften der Umfrage</h2>
+					<ul class="text-sm space-y-1">
+						<li><span class="font-mono">title</span> — Titel (Pflicht).</li>
+						<li><span class="font-mono">description</span> — einleitender Text (Markdown).</li>
+						<li><span class="font-mono">owner_team</span> — das Team, dem die Umfrage gehört; nur dessen Mitglieder sehen die Ergebnisse (Pflicht).</li>
+						<li><span class="font-mono">allow_multiple</span> — mehrere Einsendungen pro Person erlauben (Default: ja).</li>
+						<li><span class="font-mono">expires_at</span> — Ablaufdatum; danach keine Einsendungen mehr.</li>
+						<li><span class="font-mono">status</span> — <span class="font-mono">active</span> oder <span class="font-mono">disabled</span>.</li>
+					</ul>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">6. Ergebnisse</h2>
+					<p class="text-sm opacity-70">
+						Einsendungen liest und exportiert die KI über den Connector
+						(<span class="font-mono">list_submissions</span>,
+						<span class="font-mono">export_submissions</span> als CSV/JSON). Ergebnisse
+						sieht nur, wer Mitglied des <span class="font-mono">owner_team</span> ist.
+						Einzelne Einsendungen lassen sich löschen.
+					</p>
+				</div>
+			</section>
+			<section class="card bg-base-100 shadow-sm">
+				<div class="card-body">
+					<h2 class="card-title text-base">7. Schutz & Datenschutz</h2>
+					<ul class="text-sm list-disc pl-5 space-y-1">
+						<li>Öffentliche Formulare sind nur über ihren nicht erratbaren Link erreichbar und auf <span class="font-mono">noindex</span> gesetzt (keine Suchmaschinen).</li>
+						<li>Schutz gegen automatisierte Spam-Einsendungen: verstecktes Honeypot-Feld, Zeit-Prüfung, Rate-Limit pro IP.</li>
+						<li>IP-Adressen werden nur gehasht (mit Geheimnis) zur Missbrauchsabwehr gespeichert, nicht im Klartext.</li>
+						<li>Validierung erfolgt im Browser <em>und</em> auf dem Server.</li>
+					</ul>
+				</div>
+			</section>
+		</main>
+	}
+}
