@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 const schema = `
--- github_id holds the OIDC subject (opaque user id from dex; with useLoginAsID
--- that is the GitHub login). github_username holds the display name.
 CREATE TABLE IF NOT EXISTS users (
   github_id        TEXT PRIMARY KEY,
   github_username  TEXT NOT NULL,
@@ -91,6 +90,7 @@ CREATE INDEX IF NOT EXISTS oauth_tokens_github ON oauth_tokens(github_id);
 CREATE TABLE IF NOT EXISTS forms (
   id             TEXT PRIMARY KEY,
   slug           TEXT NOT NULL UNIQUE,
+  ref            TEXT,
   title          TEXT NOT NULL,
   description    TEXT,
   fields         TEXT NOT NULL DEFAULT '[]',
@@ -135,7 +135,88 @@ func openDB(path string) (*DB, error) {
 	if _, err := sqldb.Exec(schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &DB{sqldb}, nil
+	db := &DB{sqldb}
+	if err := db.migrate(); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return db, nil
+}
+
+func (db *DB) migrate() error {
+	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN ref TEXT`)
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS forms_ref ON forms(ref)`); err != nil {
+		return err
+	}
+	rows, err := db.Query(`SELECT id, title FROM forms WHERE ref IS NULL OR ref = ''`)
+	if err != nil {
+		return err
+	}
+	type pending struct{ id, title string }
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.title); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, p)
+	}
+	rows.Close()
+	for _, p := range todo {
+		if _, err := db.Exec(`UPDATE forms SET ref = ? WHERE id = ?`, db.uniqueRef(slugify(p.title), p.id), p.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) uniqueRef(base, exceptID string) string {
+	if base == "" {
+		base = "umfrage"
+	}
+	ref := base
+	for i := 2; i < 10000; i++ {
+		var x int
+		err := db.QueryRow(`SELECT 1 FROM forms WHERE ref = ? AND id != ?`, ref, exceptID).Scan(&x)
+		if err == sql.ErrNoRows {
+			return ref
+		}
+		if err != nil {
+			return base + "-" + randomSlug()[:6]
+		}
+		ref = fmt.Sprintf("%s-%d", base, i)
+	}
+	return base + "-" + randomSlug()[:6]
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.NewReplacer(
+		"ä", "ae", "ö", "oe", "ü", "ue", "ß", "ss",
+		"á", "a", "à", "a", "â", "a", "é", "e", "è", "e", "ê", "e",
+	).Replace(s)
+	var b strings.Builder
+	dash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			dash = false
+		default:
+			if b.Len() > 0 && !dash {
+				b.WriteByte('-')
+				dash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
+	}
+	if out == "" {
+		out = "umfrage"
+	}
+	return out
 }
 
 func nowMs() int64 { return time.Now().UnixMilli() }

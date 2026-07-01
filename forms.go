@@ -32,6 +32,7 @@ var (
 type Form struct {
 	ID            string     `json:"id"`
 	Slug          string     `json:"slug"`
+	Ref           string     `json:"ref"`
 	Title         string     `json:"title"`
 	Description   string     `json:"description,omitempty"`
 	Fields        []FieldDef `json:"fields"`
@@ -44,6 +45,8 @@ type Form struct {
 }
 
 func (f *Form) publicURL(base string) string { return base + "/f/" + f.Slug }
+
+func (f *Form) resultsURL(base string) string { return base + "/surveys/" + f.Ref }
 
 func (f *Form) isExpired() bool { return f.ExpiresAt != 0 && f.ExpiresAt < nowMs() }
 
@@ -141,6 +144,7 @@ func validateSubmission(form *Form, raw map[string]string) (map[string]string, m
 type createFormInput struct {
 	Title         string
 	Description   string
+	Ref           string
 	Fields        []FieldDef
 	OwnerTeam     string
 	ExpiresAt     int64
@@ -175,13 +179,19 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 		am = 1
 	}
 
+	refBase := f.Title
+	if strings.TrimSpace(in.Ref) != "" {
+		refBase = in.Ref
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		f.Slug = randomSlug()
+		f.Ref = a.db.uniqueRef(slugify(refBase), "")
 		_, err := a.db.Exec(
-			`INSERT INTO forms(id, slug, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			f.ID, f.Slug, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt,
+			`INSERT INTO forms(id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			f.ID, f.Slug, f.Ref, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt,
 		)
 		if err == nil {
 			return f, nil
@@ -196,23 +206,32 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 
 func scanForm(s interface{ Scan(...any) error }) (*Form, error) {
 	var (
-		f               Form
-		desc, createdBy sql.NullString
-		fields          string
-		am              int
-		expires         sql.NullInt64
+		f                    Form
+		ref, desc, createdBy sql.NullString
+		fields               string
+		am                   int
+		expires              sql.NullInt64
 	)
-	if err := s.Scan(&f.ID, &f.Slug, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt); err != nil {
+	if err := s.Scan(&f.ID, &f.Slug, &ref, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt); err != nil {
 		return nil, err
 	}
-	f.Description, f.CreatedBy = desc.String, createdBy.String
+	f.Ref, f.Description, f.CreatedBy = ref.String, desc.String, createdBy.String
 	f.AllowMultiple = am != 0
 	f.ExpiresAt = expires.Int64
 	_ = json.Unmarshal([]byte(fields), &f.Fields)
 	return &f, nil
 }
 
-const formCols = `id, slug, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at`
+const formCols = `id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at`
+
+func (a *App) getFormByRef(ref string) (*Form, error) {
+	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE ref = ?`, ref)
+	f, err := scanForm(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
 
 func (a *App) getFormByID(id string) (*Form, error) {
 	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE id = ?`, id)
@@ -261,6 +280,7 @@ func (a *App) listFormsForTeams(teams []string) ([]*Form, error) {
 type formPatch struct {
 	Title       *string
 	Description *string
+	Ref         *string
 	Status      *string
 	ExpiresAt   *int64
 	Fields      *[]FieldDef
@@ -276,6 +296,9 @@ func (a *App) updateForm(id string, p formPatch) (*Form, error) {
 	}
 	if p.Description != nil {
 		f.Description = *p.Description
+	}
+	if p.Ref != nil {
+		f.Ref = a.db.uniqueRef(slugify(*p.Ref), f.ID)
 	}
 	if p.Status != nil {
 		if *p.Status != "active" && *p.Status != "disabled" {
@@ -294,8 +317,8 @@ func (a *App) updateForm(id string, p formPatch) (*Form, error) {
 	}
 	fieldsJSON, _ := json.Marshal(f.Fields)
 	_, err = a.db.Exec(
-		`UPDATE forms SET title=?, description=?, status=?, expires_at=?, fields=? WHERE id=?`,
-		f.Title, nullStr(f.Description), f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), id,
+		`UPDATE forms SET title=?, description=?, ref=?, status=?, expires_at=?, fields=? WHERE id=?`,
+		f.Title, nullStr(f.Description), f.Ref, f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), id,
 	)
 	if err != nil {
 		return nil, err

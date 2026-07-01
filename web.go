@@ -41,7 +41,7 @@ func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
 	for _, f := range forms {
 		n, _ := a.countSubmissions(f.ID)
 		rows = append(rows, ui.SurveyRow{
-			Slug: f.Slug, Title: f.Title, OwnerTeam: f.OwnerTeam, Status: f.Status,
+			Slug: f.Ref, Title: f.Title, OwnerTeam: f.OwnerTeam, Status: f.Status,
 			URL: f.publicURL(a.cfg.BaseURL), Submissions: n,
 		})
 	}

@@ -455,17 +455,21 @@ func TestSubmissionsWebPage(t *testing.T) {
 	var created map[string]any
 	json.Unmarshal([]byte(toolResultText(t, create)), &created)
 	slug := created["slug"].(string)
+	ref := created["ref"].(string)
+	if ref != "kandidaten" {
+		t.Fatalf("want readable ref %q, got %q", "kandidaten", ref)
+	}
 
 	http.PostForm(ts.URL+"/f/"+slug, url.Values{"name": {"Max Mustermann"}, "ok": {"on"}, "t": {"0"}})
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	anon, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
+	anon, _ := http.NewRequest("GET", ts.URL+"/surveys/"+ref, nil)
 	ares, _ := noRedirect.Do(anon)
 	if ares.StatusCode != 302 {
 		t.Fatalf("anon want 302 redirect to login, got %d", ares.StatusCode)
 	}
 
-	member, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
+	member, _ := http.NewRequest("GET", ts.URL+"/surveys/"+ref, nil)
 	member.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
 	mres, _ := http.DefaultClient.Do(member)
 	mbody, _ := io.ReadAll(mres.Body)
@@ -478,7 +482,7 @@ func TestSubmissionsWebPage(t *testing.T) {
 		}
 	}
 
-	csv, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug+"/export.csv", nil)
+	csv, _ := http.NewRequest("GET", ts.URL+"/surveys/"+ref+"/export.csv", nil)
 	csv.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
 	cres, _ := http.DefaultClient.Do(csv)
 	cbody, _ := io.ReadAll(cres.Body)
@@ -487,11 +491,35 @@ func TestSubmissionsWebPage(t *testing.T) {
 	}
 
 	_, bobSid, _ := app.loginViaOIDC("code-bob", "agent")
-	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
+	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+ref, nil)
 	nonMember.AddCookie(&http.Cookie{Name: sessionCookie, Value: bobSid})
 	nres, _ := http.DefaultClient.Do(nonMember)
 	if nres.StatusCode != 404 {
 		t.Fatalf("non-member want 404, got %d", nres.StatusCode)
+	}
+}
+
+func TestMigrateBackfillsRefWithSlugify(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(
+		`INSERT INTO forms(id, slug, ref, title, fields, owner_team, status, allow_multiple, created_at)
+		 VALUES ('form_x','slugx',NULL,'Bäume für Rössing – Aktion 2026','[]','t','active',1,1)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var ref string
+	if err := db.QueryRow(`SELECT ref FROM forms WHERE id='form_x'`).Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref != "baeume-fuer-roessing-aktion-2026" {
+		t.Fatalf("unexpected backfilled ref %q", ref)
 	}
 }
 

@@ -29,8 +29,8 @@ func (a *App) mountPublic(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /{$}", a.handleHome)
 	mux.HandleFunc("GET /docs", a.handleDocs)
-	mux.HandleFunc("GET /surveys/{slug}", a.handleSubmissions)
-	mux.HandleFunc("GET /surveys/{slug}/export.csv", a.handleSubmissionsCSV)
+	mux.HandleFunc("GET /surveys/{ref}", a.handleSubmissions)
+	mux.HandleFunc("GET /surveys/{ref}/export.csv", a.handleSubmissionsCSV)
 	mux.HandleFunc("POST /revoke", a.handleRevoke)
 	mux.HandleFunc("GET /f/{slug}", a.handleFormGet)
 	mux.HandleFunc("POST /f/{slug}", a.handleFormPost)
@@ -40,13 +40,26 @@ func (a *App) handleDocs(w http.ResponseWriter, r *http.Request) {
 	a.renderPage(w, r, http.StatusOK, ui.Docs(a.cfg.AppName, a.cfg.BaseURL+"/mcp"))
 }
 
+func (a *App) resolveForm(key string) (*Form, error) {
+	if key == "" {
+		return nil, nil
+	}
+	if f, err := a.getFormByRef(key); err != nil || f != nil {
+		return f, err
+	}
+	if f, err := a.getFormBySlug(key); err != nil || f != nil {
+		return f, err
+	}
+	return a.getFormByID(key)
+}
+
 func (a *App) formForWeb(w http.ResponseWriter, r *http.Request) (*AuthContext, *Form, bool) {
 	ctx, _ := a.resolveSession(cookieValue(r, sessionCookie))
 	if ctx == nil {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusFound)
 		return nil, nil, false
 	}
-	form, err := a.getFormBySlug(r.PathValue("slug"))
+	form, err := a.resolveForm(r.PathValue("ref"))
 	if err != nil {
 		http.Error(w, "error", 500)
 		return nil, nil, false
@@ -97,7 +110,7 @@ func submissionsView(a *App, ctx *AuthContext, form *Form, subs []*Submission) u
 	}
 	return ui.SubmissionsData{
 		AppName: a.cfg.AppName, UserName: ctx.User.GitHubUsername,
-		Slug: form.Slug, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
+		Slug: form.Ref, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
 		PublicURL: form.publicURL(a.cfg.BaseURL), Count: len(subs), FieldCount: len(form.Fields),
 		Rows: rows,
 	}

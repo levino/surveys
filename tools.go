@@ -45,6 +45,7 @@ func toolDefs() []map[string]any {
 				"properties": map[string]any{
 					"title":          str,
 					"description":    str,
+					"ref":            map[string]any{"type": "string", "description": "Optionaler lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ohne Angabe aus dem Titel erzeugt."},
 					"owner_team":     map[string]any{"type": "string", "description": "GitHub-Team-Slug, dem die Umfrage gehört"},
 					"expires_at":     map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr."},
 					"allow_multiple": map[string]any{"type": "boolean", "description": "Mehrfach-Einsendungen pro Person erlauben (Default true)"},
@@ -85,6 +86,7 @@ func toolDefs() []map[string]any {
 				"type": "object", "required": []string{"id"},
 				"properties": map[string]any{
 					"id": str, "title": str, "description": str,
+					"ref":        map[string]any{"type": "string", "description": "Lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ändert bestehende Ergebnis-Links."},
 					"status":     map[string]any{"type": "string", "enum": []string{"active", "disabled"}},
 					"expires_at": map[string]any{"type": "string", "description": "RFC3339/YYYY-MM-DD, oder \"\" zum Entfernen"},
 					"fields":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
@@ -150,6 +152,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		var in struct {
 			Title         string     `json:"title"`
 			Description   string     `json:"description"`
+			Ref           string     `json:"ref"`
 			OwnerTeam     string     `json:"owner_team"`
 			ExpiresAt     string     `json:"expires_at"`
 			AllowMultiple *bool      `json:"allow_multiple"`
@@ -170,14 +173,15 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			allowMultiple = *in.AllowMultiple
 		}
 		form, err := a.createForm(createFormInput{
-			Title: in.Title, Description: in.Description, Fields: in.Fields,
+			Title: in.Title, Description: in.Description, Ref: in.Ref, Fields: in.Fields,
 			OwnerTeam: in.OwnerTeam, ExpiresAt: expires, AllowMultiple: allowMultiple,
 		}, ctx.User.GitHubID)
 		if err != nil {
 			return nil, err
 		}
 		return toolJSON(map[string]any{
-			"id": form.ID, "slug": form.Slug, "url": form.publicURL(a.cfg.BaseURL),
+			"id": form.ID, "slug": form.Slug, "ref": form.Ref,
+			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 		}), nil
 
@@ -190,7 +194,8 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		for _, f := range forms {
 			n, _ := a.countSubmissions(f.ID)
 			out = append(out, map[string]any{
-				"id": f.ID, "title": f.Title, "slug": f.Slug, "url": f.publicURL(a.cfg.BaseURL),
+				"id": f.ID, "title": f.Title, "slug": f.Slug, "ref": f.Ref,
+				"url": f.publicURL(a.cfg.BaseURL), "results_url": f.resultsURL(a.cfg.BaseURL),
 				"owner_team": f.OwnerTeam, "status": f.Status, "submissions": n,
 				"expires_at": isoOrEmpty(f.ExpiresAt), "created_at": isoMs(f.CreatedAt),
 			})
@@ -204,8 +209,9 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		}
 		n, _ := a.countSubmissions(form.ID)
 		return toolJSON(map[string]any{
-			"id": form.ID, "title": form.Title, "description": form.Description, "slug": form.Slug,
-			"url": form.publicURL(a.cfg.BaseURL), "owner_team": form.OwnerTeam, "status": form.Status,
+			"id": form.ID, "title": form.Title, "description": form.Description, "slug": form.Slug, "ref": form.Ref,
+			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
+			"owner_team": form.OwnerTeam, "status": form.Status,
 			"allow_multiple": form.AllowMultiple, "expires_at": isoOrEmpty(form.ExpiresAt),
 			"fields": form.Fields, "submissions": n, "created_at": isoMs(form.CreatedAt),
 		}), nil
@@ -218,6 +224,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		var in struct {
 			Title       *string     `json:"title"`
 			Description *string     `json:"description"`
+			Ref         *string     `json:"ref"`
 			Status      *string     `json:"status"`
 			ExpiresAt   *string     `json:"expires_at"`
 			Fields      *[]FieldDef `json:"fields"`
@@ -225,7 +232,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
 		}
-		patch := formPatch{Title: in.Title, Description: in.Description, Status: in.Status, Fields: in.Fields}
+		patch := formPatch{Title: in.Title, Description: in.Description, Ref: in.Ref, Status: in.Status, Fields: in.Fields}
 		if in.ExpiresAt != nil {
 			ms, err := parseExpiry(*in.ExpiresAt)
 			if err != nil {
