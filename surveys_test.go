@@ -454,19 +454,18 @@ func TestSubmissionsWebPage(t *testing.T) {
 	})
 	var created map[string]any
 	json.Unmarshal([]byte(toolResultText(t, create)), &created)
-	formID := created["id"].(string)
 	slug := created["slug"].(string)
 
 	http.PostForm(ts.URL+"/f/"+slug, url.Values{"name": {"Max Mustermann"}, "ok": {"on"}, "t": {"0"}})
 
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	anon, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	anon, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
 	ares, _ := noRedirect.Do(anon)
 	if ares.StatusCode != 302 {
 		t.Fatalf("anon want 302 redirect to login, got %d", ares.StatusCode)
 	}
 
-	member, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	member, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
 	member.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
 	mres, _ := http.DefaultClient.Do(member)
 	mbody, _ := io.ReadAll(mres.Body)
@@ -479,7 +478,7 @@ func TestSubmissionsWebPage(t *testing.T) {
 		}
 	}
 
-	csv, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID+"/export.csv", nil)
+	csv, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug+"/export.csv", nil)
 	csv.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
 	cres, _ := http.DefaultClient.Do(csv)
 	cbody, _ := io.ReadAll(cres.Body)
@@ -488,7 +487,7 @@ func TestSubmissionsWebPage(t *testing.T) {
 	}
 
 	_, bobSid, _ := app.loginViaOIDC("code-bob", "agent")
-	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+slug, nil)
 	nonMember.AddCookie(&http.Cookie{Name: sessionCookie, Value: bobSid})
 	nres, _ := http.DefaultClient.Do(nonMember)
 	if nres.StatusCode != 404 {

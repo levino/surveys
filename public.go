@@ -29,8 +29,8 @@ func (a *App) mountPublic(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /{$}", a.handleHome)
 	mux.HandleFunc("GET /docs", a.handleDocs)
-	mux.HandleFunc("GET /surveys/{id}", a.handleSubmissions)
-	mux.HandleFunc("GET /surveys/{id}/export.csv", a.handleSubmissionsCSV)
+	mux.HandleFunc("GET /surveys/{slug}", a.handleSubmissions)
+	mux.HandleFunc("GET /surveys/{slug}/export.csv", a.handleSubmissionsCSV)
 	mux.HandleFunc("POST /revoke", a.handleRevoke)
 	mux.HandleFunc("GET /f/{slug}", a.handleFormGet)
 	mux.HandleFunc("POST /f/{slug}", a.handleFormPost)
@@ -46,7 +46,7 @@ func (a *App) formForWeb(w http.ResponseWriter, r *http.Request) (*AuthContext, 
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusFound)
 		return nil, nil, false
 	}
-	form, err := a.getFormByID(r.PathValue("id"))
+	form, err := a.getFormBySlug(r.PathValue("slug"))
 	if err != nil {
 		http.Error(w, "error", 500)
 		return nil, nil, false
@@ -87,23 +87,19 @@ func (a *App) handleSubmissionsCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 func submissionsView(a *App, ctx *AuthContext, form *Form, subs []*Submission) ui.SubmissionsData {
-	cols := make([]string, 0, len(form.Fields))
-	for _, f := range form.Fields {
-		cols = append(cols, f.Label)
-	}
 	rows := make([]ui.SubmissionRow, 0, len(subs))
-	for _, s := range subs {
-		vals := make([]string, 0, len(form.Fields))
+	for i, s := range subs {
+		cells := make([]ui.SubmissionCell, 0, len(form.Fields))
 		for _, f := range form.Fields {
-			vals = append(vals, displayValue(f, s.Values[f.Key]))
+			cells = append(cells, ui.SubmissionCell{Label: f.Label, Value: displayValue(f, s.Values[f.Key])})
 		}
-		rows = append(rows, ui.SubmissionRow{CreatedAt: fmtTime(s.CreatedAt), Values: vals})
+		rows = append(rows, ui.SubmissionRow{Index: i + 1, CreatedAt: fmtTime(s.CreatedAt), Cells: cells})
 	}
 	return ui.SubmissionsData{
 		AppName: a.cfg.AppName, UserName: ctx.User.GitHubUsername,
-		ID: form.ID, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
-		PublicURL: form.publicURL(a.cfg.BaseURL), Count: len(subs),
-		Columns: cols, Rows: rows,
+		Slug: form.Slug, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
+		PublicURL: form.publicURL(a.cfg.BaseURL), Count: len(subs), FieldCount: len(form.Fields),
+		Rows: rows,
 	}
 }
 
