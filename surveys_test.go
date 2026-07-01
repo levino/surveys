@@ -432,6 +432,70 @@ func mustGet(t *testing.T, url string) *http.Response {
 	return res
 }
 
+func TestSubmissionsWebPage(t *testing.T) {
+	oidc := newOIDCMock(t,
+		mockUser{sub: "alice", name: "Alice", groups: []string{"acme:marketing"}},
+		mockUser{sub: "bob", name: "Bob", groups: []string{"acme:sales"}})
+	app := newTestApp(t, oidc)
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+
+	_, aliceSid, _ := app.loginViaOIDC("code-alice", "agent")
+	aliceTok := fullOAuthToken(t, ts, aliceSid)
+	create := mcpCall(t, ts, aliceTok, "tools/call", map[string]any{
+		"name": "create_form",
+		"arguments": map[string]any{
+			"title": "Kandidaten", "owner_team": "marketing",
+			"fields": []map[string]any{
+				{"key": "name", "label": "Name", "type": "text", "required": true},
+				{"key": "ok", "label": "Einverstanden", "type": "checkbox"},
+			},
+		},
+	})
+	var created map[string]any
+	json.Unmarshal([]byte(toolResultText(t, create)), &created)
+	formID := created["id"].(string)
+	slug := created["slug"].(string)
+
+	http.PostForm(ts.URL+"/f/"+slug, url.Values{"name": {"Max Mustermann"}, "ok": {"on"}, "t": {"0"}})
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	anon, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	ares, _ := noRedirect.Do(anon)
+	if ares.StatusCode != 302 {
+		t.Fatalf("anon want 302 redirect to login, got %d", ares.StatusCode)
+	}
+
+	member, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	member.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
+	mres, _ := http.DefaultClient.Do(member)
+	mbody, _ := io.ReadAll(mres.Body)
+	if mres.StatusCode != 200 {
+		t.Fatalf("member want 200, got %d", mres.StatusCode)
+	}
+	for _, want := range []string{"Max Mustermann", "Ja", "Kandidaten"} {
+		if !strings.Contains(string(mbody), want) {
+			t.Fatalf("submissions page missing %q", want)
+		}
+	}
+
+	csv, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID+"/export.csv", nil)
+	csv.AddCookie(&http.Cookie{Name: sessionCookie, Value: aliceSid})
+	cres, _ := http.DefaultClient.Do(csv)
+	cbody, _ := io.ReadAll(cres.Body)
+	if cres.StatusCode != 200 || !strings.Contains(string(cbody), "Max Mustermann") {
+		t.Fatalf("csv export failed: status %d", cres.StatusCode)
+	}
+
+	_, bobSid, _ := app.loginViaOIDC("code-bob", "agent")
+	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+formID, nil)
+	nonMember.AddCookie(&http.Cookie{Name: sessionCookie, Value: bobSid})
+	nres, _ := http.DefaultClient.Do(nonMember)
+	if nres.StatusCode != 404 {
+		t.Fatalf("non-member want 404, got %d", nres.StatusCode)
+	}
+}
+
 func TestExportCSV(t *testing.T) {
 	form := &Form{Fields: []FieldDef{{Key: "name", Label: "Name", Type: "text"}, {Key: "ort", Label: "Ort", Type: "text"}}}
 	subs := []*Submission{

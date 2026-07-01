@@ -432,4 +432,11 @@ func isoMs(ms int64) string {
 
 func isoOrEmpty(ms int64) string { return isoMs(ms) }
 
+func fmtTime(ms int64) string {
+	if ms == 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format("02.01.2006 15:04") + " UTC"
+}
+
 var _ = sort.Strings
