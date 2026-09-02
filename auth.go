@@ -131,6 +131,19 @@ func (a *App) destroySession(sid string) {
 }
 
 func (a *App) contextForUser(subject string) (*AuthContext, error) {
+	if a.grants != nil {
+		user, err := a.readUser(subject)
+		if err != nil || user == nil {
+			return nil, err
+		}
+		teams, err := a.grants.teamsFor(subject)
+		if err != nil {
+			// Could not verify -> no teams -> every team-scoped call is denied.
+			logJSON("error", "zitadel grants lookup failed, denying", map[string]any{"user": subject, "err": err.Error()})
+			return &AuthContext{User: user}, nil
+		}
+		return &AuthContext{User: user, Teams: teams}, nil
+	}
 	user, err := a.readUser(subject)
 	if err != nil || user == nil {
 		return nil, err

@@ -30,6 +30,14 @@ type Config struct {
 	// Default retention: new surveys get delete_at = created_at + N days
 	// unless the creator sets an explicit delete_at. 0 = keep forever.
 	RetentionDays int
+
+	// Runtime team lookup at ZITADEL (see zitadel.go). When ZitadelServiceToken
+	// and ZitadelTeamProjects are set, the `groups` claim is ignored and every
+	// request asks ZITADEL who the user is a member of.
+	ZitadelOrgID          string
+	ZitadelServiceToken   string
+	ZitadelTeamProjects   map[string]string
+	ZitadelMaintainerRole string
 }
 
 func env(key, def string) string {
@@ -54,6 +62,11 @@ func loadConfig() Config {
 		MaintainerSuffix: env("OIDC_MAINTAINER_SUFFIX", ""),
 		Scopes:           env("OIDC_SCOPES", "openid profile email groups"),
 		RetentionDays:    envInt("DEFAULT_RETENTION_DAYS", 0),
+
+		ZitadelOrgID:          env("ZITADEL_ORG_ID", ""),
+		ZitadelServiceToken:   os.Getenv("ZITADEL_SERVICE_TOKEN"),
+		ZitadelTeamProjects:   parseTeamProjects(env("ZITADEL_TEAM_PROJECTS", "")),
+		ZitadelMaintainerRole: env("ZITADEL_MAINTAINER_ROLE", "admin"),
 	}
 }
 
@@ -102,13 +115,16 @@ type App struct {
 	http   *http.Client
 	oidc   *oidcProvider
 	oidcMu sync.Mutex
+	grants *zitadelGrants // nil = teams come from the groups claim at login
 }
 
 func newApp(cfg Config, db *DB) *App {
+	client := &http.Client{Timeout: 15 * time.Second}
 	return &App{
-		cfg:  cfg,
-		db:   db,
-		rl:   newRateLimiter(),
-		http: &http.Client{Timeout: 15 * time.Second},
+		cfg:    cfg,
+		db:     db,
+		rl:     newRateLimiter(),
+		http:   client,
+		grants: newZitadelGrants(cfg, client),
 	}
 }
