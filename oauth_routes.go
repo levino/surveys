@@ -17,64 +17,42 @@ const (
 func (a *App) mountOauth(mux *http.ServeMux) {
 	base := a.cfg.BaseURL
 
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+	// RFC 9728 protected resource metadata — at the root and, because the MCP
+	// endpoint has a path, at the path-suffixed location clients try first.
+	prm := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
-			"resource":                 base + "/mcp",
+			"resource":                 a.mcpResource(),
 			"authorization_servers":    []string{base},
 			"bearer_methods_supported": []string{"header"},
-			"scopes_supported":         []string{"mcp"},
+			"scopes_supported":         supportedScopes,
+			"resource_documentation":   base + "/docs",
 		})
-	})
+	}
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", prm)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", prm)
 
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+	// RFC 8414 authorization server metadata, also under the OpenID Connect
+	// discovery path that MCP clients try second. What makes Claude pick CIMD
+	// without asking the user: client_id_metadata_document_supported AND
+	// "none" among token_endpoint_auth_methods_supported.
+	asm := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"issuer":                                base,
 			"authorization_endpoint":                base + "/oauth/authorize",
 			"token_endpoint":                        base + "/oauth/token",
-			"registration_endpoint":                 base + "/oauth/register",
 			"response_types_supported":              []string{"code"},
 			"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 			"code_challenge_methods_supported":      []string{"S256"},
-			"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
-			"scopes_supported":                      []string{"mcp"},
-			"service_documentation":                 base + "/",
+			"token_endpoint_auth_methods_supported": []string{"none"},
+			// Clients register by URL: client_id is an https URL serving a
+			// client metadata document (no dynamic registration endpoint).
+			"client_id_metadata_document_supported": true,
+			"scopes_supported":                      supportedScopes,
+			"service_documentation":                 base + "/docs",
 		})
-	})
-
-	mux.HandleFunc("POST /oauth/register", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			RedirectURIs            []string `json:"redirect_uris"`
-			ClientName              string   `json:"client_name"`
-			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-			GrantTypes              []string `json:"grant_types"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid_client_metadata", "error_description": "JSON body required"})
-			return
-		}
-		client, err := a.registerClient(registerClientInput{
-			RedirectURIs:            body.RedirectURIs,
-			ClientName:              body.ClientName,
-			TokenEndpointAuthMethod: body.TokenEndpointAuthMethod,
-			GrantTypes:              body.GrantTypes,
-		})
-		if err != nil {
-			writeOAuthError(w, err)
-			return
-		}
-		resp := map[string]any{
-			"client_id":                  client.ClientID,
-			"client_name":                client.ClientName,
-			"redirect_uris":              client.RedirectURIs,
-			"grant_types":                client.GrantTypes,
-			"token_endpoint_auth_method": client.TokenAuthMeth,
-			"client_id_issued_at":        client.CreatedAt / 1000,
-		}
-		if client.ClientSecret != "" {
-			resp["client_secret"] = client.ClientSecret
-		}
-		writeJSON(w, 201, resp)
-	})
+	}
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", asm)
+	mux.HandleFunc("GET /.well-known/openid-configuration", asm)
 
 	mux.HandleFunc("GET /oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -173,10 +151,10 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 		case "authorization_code":
 			tokens, err := a.exchangeAuthorizationCode(exchangeCodeInput{
 				ClientID:     form["client_id"],
-				ClientSecret: form["client_secret"],
 				Code:         form["code"],
 				RedirectURI:  form["redirect_uri"],
 				CodeVerifier: form["code_verifier"],
+				Resource:     form["resource"],
 			})
 			if err != nil {
 				writeOAuthError(w, err)
@@ -186,7 +164,6 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 		case "refresh_token":
 			tokens, err := a.exchangeRefreshToken(exchangeRefreshInput{
 				ClientID:     form["client_id"],
-				ClientSecret: form["client_secret"],
 				RefreshToken: form["refresh_token"],
 			})
 			if err != nil {
@@ -206,16 +183,21 @@ func (a *App) renderConsent(w http.ResponseWriter, r *http.Request, authzID stri
 		http.Error(w, "authorization expired", 400)
 		return
 	}
-	name := req.ClientID
-	if client, _ := a.getClient(req.ClientID); client != nil && client.ClientName != "" {
+	// The metadata document is self-asserted, so the trust anchor shown to the
+	// user is the HOST of the client_id URL, not the client_name inside it.
+	cu, _ := url.Parse(req.ClientID)
+	name := ""
+	if client, _ := a.getClient(req.ClientID); client != nil {
 		name = client.ClientName
 	}
+	ru, _ := url.Parse(req.RedirectURI)
 	scope := req.Scope
 	if scope == "" {
 		scope = defaultScope
 	}
 	a.renderPage(w, r, http.StatusOK, ui.Consent(ui.ConsentData{
-		AppName: a.cfg.AppName, ClientName: name, AuthzID: authzID, Scope: scope,
+		AppName: a.cfg.AppName, ClientName: name, ClientHost: cu.Host, ClientID: req.ClientID,
+		RedirectHost: ru.Host, Loopback: isLoopback(ru), AuthzID: authzID, Scope: scope,
 	}))
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strings"
@@ -116,6 +117,9 @@ type App struct {
 	oidc   *oidcProvider
 	oidcMu sync.Mutex
 	grants *zitadelGrants // nil = teams come from the groups claim at login
+
+	cimd           cimdCache
+	cimdAllowLocal bool // tests only: allow http:// and loopback metadata hosts
 }
 
 func newApp(cfg Config, db *DB) *App {
@@ -126,5 +130,14 @@ func newApp(cfg Config, db *DB) *App {
 		rl:     newRateLimiter(),
 		http:   client,
 		grants: newZitadelGrants(cfg, client),
+		cimd:   cimdCache{entries: map[string]cimdEntry{}},
 	}
+}
+
+func (a *App) ctx() context.Context {
+	c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The lookup is synchronous and short; letting the timer fire is the
+	// documented way to release it without threading cancel through callers.
+	_ = cancel
+	return c
 }

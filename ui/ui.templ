@@ -71,10 +71,14 @@ type FormView struct {
 }
 
 type ConsentData struct {
-	AppName    string
-	ClientName string
-	AuthzID    string
-	Scope      string
+	AppName      string
+	ClientName   string // self-asserted, from the metadata document
+	ClientHost   string // the trust anchor: host of the client_id URL
+	ClientID     string
+	RedirectHost string
+	Loopback     bool // redirect goes to a local process on the user's machine
+	AuthzID      string
+	Scope        string
 }
 
 templ Layout(title string) {
@@ -153,10 +157,21 @@ templ Consent(c ConsentData) {
 					<div class="card-body">
 						<h1 class="card-title">Zugriff erlauben?</h1>
 						<p>
-							<span class="font-semibold">{ c.ClientName }</span>
+							Eine Anwendung von
+							<span class="font-semibold">{ c.ClientHost }</span>
+							if c.ClientName != "" {
+								<span class="opacity-70">(nennt sich „{ c.ClientName }")</span>
+							}
 							möchte als KI-Client auf deine Umfragen zugreifen.
 						</p>
 						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine Teams)</div>
+						<div class="text-sm opacity-70">Antwort geht an: <span class="font-mono">{ c.RedirectHost }</span></div>
+						if c.Loopback {
+							<div class="alert alert-warning text-sm mt-2">
+								Die Antwort geht an ein Programm auf deinem eigenen Rechner. Erlaube das nur, wenn du diese Anmeldung gerade selbst von dort gestartet hast.
+							</div>
+						}
+						<div class="text-xs opacity-50 break-all">{ c.ClientID }</div>
 						<div class="card-actions justify-end mt-4">
 							<form method="post" action="/oauth/deny">
 								<input type="hidden" name="authz_id" value={ c.AuthzID }/>

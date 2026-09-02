@@ -30,16 +30,31 @@ at `/docs`.
 
 ## Authentication
 
-The service ships its own OAuth 2.0 server (so Claude can connect as a remote
-MCP connector via dynamic client registration + PKCE) and delegates the actual
-login to an upstream **OIDC** identity provider. Any provider that emits the
-user's group/team membership as a `groups` claim works — e.g. **Zitadel**,
-Keycloak, or dex federating to GitHub. To switch providers you only change
-`OIDC_ISSUER` (and client id/secret).
+The service ships its own OAuth 2.1 authorization server for MCP clients and
+delegates the actual login to an upstream **OIDC** identity provider (ZITADEL,
+Keycloak, dex …). To switch providers you only change `OIDC_ISSUER` (and
+client id/secret).
 
-The `groups` claim values may be namespaced (e.g. `myorg:marketing`).
-`OIDC_GROUP_PREFIX` optionally strips that prefix so a survey's `owner_team` is
-the bare slug.
+MCP clients identify themselves with a **Client ID Metadata Document**
+([draft-ietf-oauth-client-id-metadata-document](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document),
+MCP spec 2025-11-25): the `client_id` *is* an https URL, and the JSON served
+there says who the client is and where it may be redirected. The server
+fetches it (no redirects, public hosts only, 16 KiB cap, cached per
+`Cache-Control`), checks it is self-referential, and requires every
+`redirect_uri` to be same-origin with the document or a loopback address.
+There is **no dynamic client registration** and no client table to prune;
+public clients with PKCE (S256) only. The last good document is kept for
+seven days so a metadata-host outage does not break token refreshes.
+
+Claude picks this mode by itself: the authorization-server metadata
+advertises `client_id_metadata_document_supported: true` and `"none"` in
+`token_endpoint_auth_methods_supported`, the `401` from `/mcp` carries
+`WWW-Authenticate: Bearer … resource_metadata=… scope="mcp"`, and the
+protected-resource metadata is served at both `/.well-known/oauth-protected-resource`
+and `…/mcp`. Loopback redirects (`http://localhost/…`, `http://127.0.0.1/…`)
+match with the port ignored (RFC 8252) so Claude Code's ephemeral port works;
+the consent page shows the client's **host** as the relying party and warns
+when the redirect goes to a local process.
 
 ## Configuration (env only, 12-factor)
 
@@ -116,9 +131,10 @@ flattens the user's grants into `groups`, e.g. `["klasse-wiesen",
 
 ## MCP in Claude
 
-Claude discovers the OAuth server via `/.well-known/oauth-protected-resource`
-and `/.well-known/oauth-authorization-server`, registers dynamically (RFC 7591)
-and runs a PKCE auth-code flow. Resource URL for Claude: `https://<host>/mcp`.
+Add `https://<host>/mcp` as a custom connector. Claude discovers the
+authorization server through the `401` → protected-resource metadata → server
+metadata chain, sees CIMD support and uses its own hosted client metadata
+document — nothing to choose or paste in the connector dialog.
 
 MCP tools: `list_teams`, `create_form`, `list_forms`, `get_form`, `update_form`,
 `disable_form`, `delete_form`, `list_submissions`, `export_submissions`,
