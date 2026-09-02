@@ -84,7 +84,26 @@ Register a client at your provider:
 
 The `groups` claim must carry the user's team/group membership.
 
-### ZITADEL without a `groups` scope
+### ZITADEL: teams from live grants (recommended)
+
+Instead of trusting a `groups` claim minted at login, the service can ask
+ZITADEL **on every request** which projects the user holds a grant in. That is
+the right choice when ZITADEL is close by: an MCP token lives long and refreshes
+itself, so a class membership revoked in ZITADEL would otherwise linger until
+the token dies — and a newly granted one would never arrive. Set:
+
+| Variable | Purpose |
+|---|---|
+| `ZITADEL_ORG_ID` | The organisation the projects live in |
+| `ZITADEL_SERVICE_TOKEN` | PAT of a **read-only** machine user (manager role `ORG_OWNER_VIEWER`) — an infrastructure credential, installed in the cluster, never committed |
+| `ZITADEL_TEAM_PROJECTS` | `"<projectId>=<team-slug>,…"` — one team per ZITADEL project |
+| `ZITADEL_MAINTAINER_ROLE` | Role key that makes a member a maintainer (default `admin`) |
+
+With these set the `groups` claim is ignored; use `OIDC_SCOPES="openid profile
+email"`. Lookups are memoised for five seconds. If ZITADEL does not answer,
+the user has **no** teams for that call — deny, never wave through.
+
+### ZITADEL without a `groups` scope (claim-based alternative)
 
 ZITADEL keeps project roles in a nested claim and an OIDC client only sees the
 roles of *its own* project. To use one instance for several teams (e.g. one

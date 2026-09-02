@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -672,5 +673,98 @@ func TestRetentionAndPurge(t *testing.T) {
 	app.db.QueryRow(`SELECT COUNT(*) FROM forms`).Scan(&left)
 	if left != 1 {
 		t.Fatalf("expected 1 form left, got %d", left)
+	}
+}
+
+// Runtime grants: teams come from ZITADEL on every call, not from the login.
+// A revoked grant disappears at once; an unreachable ZITADEL means no access.
+func TestZitadelRuntimeGrants(t *testing.T) {
+	oidc := newOIDCMock(t, mockUser{sub: "alice", name: "Alice"}, mockUser{sub: "bob", name: "Bob"})
+	var (
+		mu     sync.Mutex
+		grants = map[string][]map[string]any{ // projectId -> rows
+			"p-a": {{"userId": "alice", "roleKeys": []string{"mitglied", "admin"}, "state": "USER_GRANT_STATE_ACTIVE"},
+				{"userId": "bob", "roleKeys": []string{"mitglied"}, "state": "USER_GRANT_STATE_ACTIVE"}},
+			"p-b": {{"userId": "bob", "roleKeys": []string{"mitglied"}, "state": "USER_GRANT_STATE_ACTIVE"}},
+		}
+		down bool
+	)
+	zmux := http.NewServeMux()
+	zmux.HandleFunc("POST /management/v1/users/grants/_search", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if down {
+			w.WriteHeader(503)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer svc-token" || r.Header.Get("x-zitadel-orgid") != "org1" {
+			w.WriteHeader(401)
+			return
+		}
+		var q struct {
+			Queries []struct {
+				P struct {
+					ProjectID string `json:"projectId"`
+				} `json:"projectIdQuery"`
+			} `json:"queries"`
+		}
+		json.NewDecoder(r.Body).Decode(&q)
+		writeJSON(w, 200, map[string]any{"result": grants[q.Queries[0].P.ProjectID]})
+	})
+	zsrv := httptest.NewServer(zmux)
+	defer zsrv.Close()
+
+	app := newTestApp(t, oidc)
+	app.cfg.OIDCIssuer = oidc.URL
+	app.cfg.ZitadelOrgID = "org1"
+	app.cfg.ZitadelServiceToken = "svc-token"
+	app.cfg.ZitadelTeamProjects = map[string]string{"p-a": "klasse-a", "p-b": "klasse-b"}
+	app.cfg.ZitadelMaintainerRole = "admin"
+	app.grants = newZitadelGrants(app.cfg, app.http)
+	app.grants.issuer = zsrv.URL // grants live at the issuer; the mock OIDC has no management API
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+
+	tok := func(sub string) string {
+		_, sid, err := app.loginViaOIDC("code-"+sub, "agent")
+		if err != nil {
+			t.Fatalf("login: %v", err)
+		}
+		return fullOAuthToken(t, ts, sid)
+	}
+	alice, bob := tok("alice"), tok("bob")
+	teams := toolResultText(t, mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
+	if !strings.Contains(teams, `"klasse-a"`) || !strings.Contains(teams, `"klasse-b"`) {
+		t.Fatalf("bob should be in both classes via grants, got %s", teams)
+	}
+	teams = toolResultText(t, mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
+	if !strings.Contains(teams, `"is_maintainer": true`) || strings.Contains(teams, `"klasse-b"`) {
+		t.Fatalf("alice: maintainer of klasse-a only, got %s", teams)
+	}
+
+	create := mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "create_form",
+		"arguments": map[string]any{"title": "Fest", "owner_team": "klasse-b",
+			"fields": []map[string]any{{"key": "n", "label": "N", "type": "text"}}}})
+	var created map[string]any
+	json.Unmarshal([]byte(toolResultText(t, create)), &created)
+	formID := created["id"].(string)
+
+	// revoke bob's klasse-b grant: gone at once, even though his token is unchanged
+	mu.Lock()
+	grants["p-b"] = nil
+	mu.Unlock()
+	app.grants.cache = map[string]grantsCache{}
+	res, _ := mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "get_form", "arguments": map[string]any{"id": formID}})["result"].(map[string]any)
+	if res["isError"] != true {
+		t.Fatalf("revoked grant must lose access immediately")
+	}
+	// ZITADEL down: deny, do not wave through
+	mu.Lock()
+	down = true
+	mu.Unlock()
+	app.grants.cache = map[string]grantsCache{}
+	teams = toolResultText(t, mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
+	if strings.Contains(teams, `"klasse-a"`) {
+		t.Fatalf("with ZITADEL down nobody may keep teams, got %s", teams)
 	}
 }

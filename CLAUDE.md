@@ -14,6 +14,10 @@ CSS. See `README.md` for the user-facing overview and configuration.
 - **Auth** (`oauth.go`, `oauth_routes.go`, `oidc.go`, `auth.go`): own OAuth 2.0
   AS for MCP clients (dynamic registration + PKCE); login delegated to an
   upstream OIDC provider. A survey is owned by a `groups`-claim team.
+- **Teams** come either from the `groups` claim cached at login (`user_teams`)
+  or, when `ZITADEL_*` is configured, from a live grants lookup on every
+  request (`zitadel.go`, wired in `contextForUser`). Prefer the lookup; it is
+  what keeps a revoked membership from surviving inside a long-lived MCP token.
 - **Authorization** (`auth.go` `canManage`): team members read; the creator
   or a team maintainer (`IsMaintainer`, from `OIDC_MAINTAINER_SUFFIX`) writes.
   Mutating tools go through `requireManagedForm`; never add a global admin.
