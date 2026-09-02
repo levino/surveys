@@ -70,7 +70,7 @@ func (a *App) oidcAuthCodeURL(state string) (string, error) {
 	q.Set("client_id", a.cfg.OIDCClientID)
 	q.Set("redirect_uri", a.cfg.callbackURL())
 	q.Set("response_type", "code")
-	q.Set("scope", "openid profile email groups")
+	q.Set("scope", a.cfg.Scopes)
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
@@ -150,15 +150,19 @@ func parseIDToken(idToken string) (*oidcClaims, error) {
 }
 
 func (a *App) teamsFromClaims(c *oidcClaims) []teamMembership {
-	seen := map[string]bool{}
+	idx := map[string]int{}
 	var out []teamMembership
 	for _, g := range c.Groups {
-		slug := a.cfg.teamFromGroup(g)
-		if slug == "" || seen[slug] {
+		slug, maintainer := a.cfg.splitGroup(g)
+		if slug == "" {
 			continue
 		}
-		seen[slug] = true
-		out = append(out, teamMembership{Slug: slug})
+		if i, ok := idx[slug]; ok {
+			out[i].IsMaintainer = out[i].IsMaintainer || maintainer
+			continue
+		}
+		idx[slug] = len(out)
+		out = append(out, teamMembership{Slug: slug, IsMaintainer: maintainer})
 	}
 	return out
 }

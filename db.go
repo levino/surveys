@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS forms (
   allow_multiple INTEGER NOT NULL DEFAULT 1,
   expires_at     INTEGER,
   created_by     TEXT,
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  delete_at      INTEGER
 );
 CREATE INDEX IF NOT EXISTS forms_owner_team ON forms(owner_team);
 
@@ -144,6 +145,7 @@ func openDB(path string) (*DB, error) {
 
 func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN ref TEXT`)
+	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN delete_at INTEGER`)
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS forms_ref ON forms(ref)`); err != nil {
 		return err
 	}

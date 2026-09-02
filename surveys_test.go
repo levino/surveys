@@ -79,9 +79,17 @@ func newTestApp(t *testing.T, oidc *httptest.Server) *App {
 		OIDCClientID:     "surveys",
 		OIDCClientSecret: "secret",
 		GroupPrefix:      "acme:",
+		MaintainerSuffix: ":admin",
+		Scopes:           "openid profile email groups",
 		SessionSecret:    "test-secret",
 	}
 	return newApp(cfg, db)
+}
+
+func newTestAppRetention(t *testing.T, oidc *httptest.Server, days int) *App {
+	app := newTestApp(t, oidc)
+	app.cfg.RetentionDays = days
+	return app
 }
 
 func b64Challenge(verifier string) string {
@@ -540,5 +548,129 @@ func TestPKCERejectsBadVerifier(t *testing.T) {
 	}
 	if !verifyPKCE(b64Challenge("right"), "S256", "right") {
 		t.Fatal("PKCE rejected correct verifier")
+	}
+}
+
+// Creator = admin, team members read, maintainers (":admin" suffix) manage,
+// other teams see nothing — and no one is a global admin.
+func TestCreatorAdminAndTeamRead(t *testing.T) {
+	oidc := newOIDCMock(t,
+		mockUser{sub: "alice", name: "Alice", groups: []string{"acme:klasse-a"}},
+		mockUser{sub: "carol", name: "Carol", groups: []string{"acme:klasse-a"}},
+		mockUser{sub: "dave", name: "Dave", groups: []string{"acme:klasse-a", "acme:klasse-a:admin"}},
+		mockUser{sub: "erin", name: "Erin", groups: []string{"acme:klasse-b", "acme:klasse-b:admin"}})
+	app := newTestApp(t, oidc)
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+	tok := func(sub string) string {
+		_, sid, err := app.loginViaOIDC("code-"+sub, "agent")
+		if err != nil {
+			t.Fatalf("login %s: %v", sub, err)
+		}
+		return fullOAuthToken(t, ts, sid)
+	}
+	alice, carol, dave, erin := tok("alice"), tok("carol"), tok("dave"), tok("erin")
+
+	teams := mcpCall(t, ts, dave, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}})
+	if txt := toolResultText(t, teams); !strings.Contains(txt, `"is_maintainer": true`) || !strings.Contains(txt, `"slug": "klasse-a"`) {
+		t.Fatalf("dave should be maintainer of klasse-a, got %s", txt)
+	}
+
+	create := mcpCall(t, ts, alice, "tools/call", map[string]any{
+		"name": "create_form",
+		"arguments": map[string]any{"title": "Ausflug", "owner_team": "klasse-a",
+			"fields": []map[string]any{{"key": "name", "label": "Name", "type": "text", "required": true}}},
+	})
+	var created map[string]any
+	json.Unmarshal([]byte(toolResultText(t, create)), &created)
+	formID := created["id"].(string)
+	if created["can_manage"] != true || created["created_by"] != "alice" {
+		t.Fatalf("creator must manage: %v", created)
+	}
+
+	isErr := func(res map[string]any) bool { r, _ := res["result"].(map[string]any); return r["isError"] == true }
+
+	// carol: same class -> sees it, reads results, cannot change or delete
+	lf := mcpCall(t, ts, carol, "tools/call", map[string]any{"name": "list_forms", "arguments": map[string]any{}})
+	var lst map[string]any
+	json.Unmarshal([]byte(toolResultText(t, lf)), &lst)
+	forms, _ := lst["forms"].([]any)
+	if len(forms) != 1 || forms[0].(map[string]any)["can_manage"] != false {
+		t.Fatalf("carol should see 1 form without manage rights, got %v", lst)
+	}
+	if isErr(mcpCall(t, ts, carol, "tools/call", map[string]any{"name": "list_submissions", "arguments": map[string]any{"form_id": formID}})) {
+		t.Fatalf("carol must be able to read results")
+	}
+	if !isErr(mcpCall(t, ts, carol, "tools/call", map[string]any{"name": "update_form", "arguments": map[string]any{"id": formID, "title": "x"}})) {
+		t.Fatalf("carol must not update")
+	}
+	if !isErr(mcpCall(t, ts, carol, "tools/call", map[string]any{"name": "delete_form", "arguments": map[string]any{"id": formID}})) {
+		t.Fatalf("carol must not delete")
+	}
+	// dave: maintainer of klasse-a -> may change
+	if isErr(mcpCall(t, ts, dave, "tools/call", map[string]any{"name": "update_form", "arguments": map[string]any{"id": formID, "title": "Ausflug 2"}})) {
+		t.Fatalf("maintainer must be able to update")
+	}
+	// erin: maintainer, but of another class -> nothing at all
+	le := mcpCall(t, ts, erin, "tools/call", map[string]any{"name": "list_forms", "arguments": map[string]any{}})
+	var el map[string]any
+	json.Unmarshal([]byte(toolResultText(t, le)), &el)
+	if ef, _ := el["forms"].([]any); len(ef) != 0 {
+		t.Fatalf("erin must not see klasse-a surveys, got %v", el)
+	}
+	if !isErr(mcpCall(t, ts, erin, "tools/call", map[string]any{"name": "get_form", "arguments": map[string]any{"id": formID}})) {
+		t.Fatalf("erin must not read klasse-a survey")
+	}
+	// alice deletes her own
+	if isErr(mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "delete_form", "arguments": map[string]any{"id": formID}})) {
+		t.Fatalf("creator must be able to delete")
+	}
+}
+
+// delete_at: explicit dates, the instance default, and the purge.
+func TestRetentionAndPurge(t *testing.T) {
+	oidc := newOIDCMock(t, mockUser{sub: "alice", name: "Alice", groups: []string{"acme:klasse-a"}})
+	app := newTestAppRetention(t, oidc, 30)
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+	_, sid, _ := app.loginViaOIDC("code-alice", "agent")
+	tok := fullOAuthToken(t, ts, sid)
+	fields := []map[string]any{{"key": "name", "label": "Name", "type": "text"}}
+
+	// default retention applies
+	c1 := mcpCall(t, ts, tok, "tools/call", map[string]any{"name": "create_form",
+		"arguments": map[string]any{"title": "Default", "owner_team": "klasse-a", "fields": fields}})
+	var f1 map[string]any
+	json.Unmarshal([]byte(toolResultText(t, c1)), &f1)
+	del1, _ := time.Parse(time.RFC3339, f1["delete_at"].(string))
+	if d := time.Until(del1); d < 29*24*time.Hour || d > 31*24*time.Hour {
+		t.Fatalf("default delete_at should be ~30d out, got %v", f1["delete_at"])
+	}
+	// clearing is refused while a default retention exists
+	if r, _ := mcpCall(t, ts, tok, "tools/call", map[string]any{"name": "update_form",
+		"arguments": map[string]any{"id": f1["id"], "delete_at": ""}})["result"].(map[string]any); r["isError"] != true {
+		t.Fatalf("clearing delete_at must be refused under default retention")
+	}
+	// explicit past date: hidden immediately, purged by the sweeper, form + submissions gone
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	c2 := mcpCall(t, ts, tok, "tools/call", map[string]any{"name": "create_form",
+		"arguments": map[string]any{"title": "Alt", "owner_team": "klasse-a", "fields": fields, "delete_at": past}})
+	var f2 map[string]any
+	json.Unmarshal([]byte(toolResultText(t, c2)), &f2)
+	if res, _ := http.Get(ts.URL + "/f/" + f2["slug"].(string)); res.StatusCode != 404 {
+		t.Fatalf("due survey must be gone from the public URL, got %d", res.StatusCode)
+	}
+	lf := mcpCall(t, ts, tok, "tools/call", map[string]any{"name": "list_forms", "arguments": map[string]any{}})
+	if strings.Contains(toolResultText(t, lf), `"Alt"`) {
+		t.Fatalf("due survey must not be listed")
+	}
+	n, err := app.purgeDueForms()
+	if err != nil || n != 1 {
+		t.Fatalf("purge: n=%d err=%v", n, err)
+	}
+	var left int
+	app.db.QueryRow(`SELECT COUNT(*) FROM forms`).Scan(&left)
+	if left != 1 {
+		t.Fatalf("expected 1 form left, got %d", left)
 	}
 }

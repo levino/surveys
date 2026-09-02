@@ -24,6 +24,17 @@ func main() {
 	defer db.Close()
 
 	app := newApp(cfg, db)
+	// Data minimisation: purge surveys past their delete_at at start and hourly.
+	go func() {
+		for {
+			if n, err := app.purgeDueForms(); err != nil {
+				logJSON("error", "purge failed", map[string]any{"err": err.Error()})
+			} else if n > 0 {
+				logJSON("info", "purged surveys past delete_at", map[string]any{"count": n})
+			}
+			time.Sleep(time.Hour)
+		}
+	}()
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           requestLogger(app.routes()),

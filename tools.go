@@ -33,12 +33,12 @@ func toolDefs() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "list_teams",
-			"description": "Liste der GitHub-Teams (Verbände), in denen der angemeldete Nutzer Mitglied ist. owner_team beim Anlegen einer Umfrage muss eines dieser Teams sein.",
+			"description": "Teams (Klassen/Verbände), in denen der angemeldete Nutzer Mitglied ist, mit is_maintainer-Flag, plus die Standard-Aufbewahrung (retention_days) der Instanz. owner_team beim Anlegen einer Umfrage muss eines dieser Teams sein.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			"name":        "create_form",
-			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare URL zurück. Die Umfrage gehört dem owner_team; nur Mitglieder dieses Teams können Ergebnisse lesen.",
+			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare Teilnahme-URL zurück (kein Login nötig, noindex). Die Umfrage gehört dem owner_team: alle Mitglieder dieses Teams sehen sie und lesen die Ergebnisse; ändern und löschen darf nur, wer sie angelegt hat (oder ein Maintainer des Teams). Datensparsamkeit: delete_at setzt, wann Umfrage und Einsendungen automatisch verschwinden.",
 			"inputSchema": map[string]any{
 				"type":     "object",
 				"required": []string{"title", "owner_team", "fields"},
@@ -46,8 +46,9 @@ func toolDefs() []map[string]any {
 					"title":          str,
 					"description":    str,
 					"ref":            map[string]any{"type": "string", "description": "Optionaler lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ohne Angabe aus dem Titel erzeugt."},
-					"owner_team":     map[string]any{"type": "string", "description": "GitHub-Team-Slug, dem die Umfrage gehört"},
-					"expires_at":     map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr."},
+					"owner_team":     map[string]any{"type": "string", "description": "Team-Slug (z. B. die Klasse), dem die Umfrage gehört — eines aus list_teams"},
+					"expires_at":     map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr; Ergebnisse bleiben bis delete_at lesbar."},
+					"delete_at":      map[string]any{"type": "string", "description": "Löschdatum (RFC3339 oder YYYY-MM-DD): danach werden Umfrage UND alle Einsendungen automatisch gelöscht. Ohne Angabe gilt die Standard-Aufbewahrung der Instanz (siehe list_teams)."},
 					"allow_multiple": map[string]any{"type": "boolean", "description": "Mehrfach-Einsendungen pro Person erlauben (Default true)"},
 					"fields": map[string]any{
 						"type":        "array",
@@ -71,7 +72,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "list_forms",
-			"description": "Listet alle Umfragen, die einem Team des Nutzers gehören.",
+			"description": "Listet die Umfragen der eigenen Teams (eigene und die der Klassen, in denen man Mitglied ist). can_manage sagt, ob der Nutzer sie ändern/löschen darf.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
@@ -81,7 +82,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "update_form",
-			"description": "Ändert eine Umfrage (Titel, Beschreibung, Status active/disabled, Ablaufdatum, Felder).",
+			"description": "Ändert eine Umfrage (Titel, Beschreibung, Status active/disabled, Ablauf- und Löschdatum, Felder). Nur Ersteller oder Team-Maintainer.",
 			"inputSchema": map[string]any{
 				"type": "object", "required": []string{"id"},
 				"properties": map[string]any{
@@ -89,18 +90,19 @@ func toolDefs() []map[string]any {
 					"ref":        map[string]any{"type": "string", "description": "Lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ändert bestehende Ergebnis-Links."},
 					"status":     map[string]any{"type": "string", "enum": []string{"active", "disabled"}},
 					"expires_at": map[string]any{"type": "string", "description": "RFC3339/YYYY-MM-DD, oder \"\" zum Entfernen"},
+					"delete_at":  map[string]any{"type": "string", "description": "Löschdatum RFC3339/YYYY-MM-DD; \"\" entfernt es (nur ohne Standard-Aufbewahrung möglich)"},
 					"fields":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 				},
 			},
 		},
 		{
 			"name":        "disable_form",
-			"description": "Deaktiviert eine Umfrage (nimmt keine Einsendungen mehr an).",
+			"description": "Deaktiviert eine Umfrage (nimmt keine Einsendungen mehr an). Nur Ersteller oder Team-Maintainer.",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str}},
 		},
 		{
 			"name":        "delete_form",
-			"description": "Löscht eine Umfrage samt aller Einsendungen. Unwiderruflich.",
+			"description": "Löscht eine Umfrage samt aller Einsendungen sofort. Unwiderruflich. Nur Ersteller oder Team-Maintainer.",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str}},
 		},
 		{
@@ -129,7 +131,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "delete_submission",
-			"description": "Löscht eine einzelne Einsendung.",
+			"description": "Löscht eine einzelne Einsendung. Nur Ersteller oder Team-Maintainer der Umfrage.",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str}},
 		},
 	}
@@ -146,7 +148,7 @@ func (a *App) dispatchTool(name string, args json.RawMessage, ctx *AuthContext) 
 func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map[string]any, error) {
 	switch name {
 	case "list_teams":
-		return toolJSON(map[string]any{"teams": ctx.Teams}), nil
+		return toolJSON(map[string]any{"teams": ctx.Teams, "retention_days": a.cfg.RetentionDays}), nil
 
 	case "create_form":
 		var in struct {
@@ -155,6 +157,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			Ref           string     `json:"ref"`
 			OwnerTeam     string     `json:"owner_team"`
 			ExpiresAt     string     `json:"expires_at"`
+			DeleteAt      string     `json:"delete_at"`
 			AllowMultiple *bool      `json:"allow_multiple"`
 			Fields        []FieldDef `json:"fields"`
 		}
@@ -168,13 +171,17 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		if err != nil {
 			return nil, err
 		}
+		deleteAt, err := parseExpiry(in.DeleteAt)
+		if err != nil {
+			return nil, err
+		}
 		allowMultiple := true
 		if in.AllowMultiple != nil {
 			allowMultiple = *in.AllowMultiple
 		}
 		form, err := a.createForm(createFormInput{
 			Title: in.Title, Description: in.Description, Ref: in.Ref, Fields: in.Fields,
-			OwnerTeam: in.OwnerTeam, ExpiresAt: expires, AllowMultiple: allowMultiple,
+			OwnerTeam: in.OwnerTeam, ExpiresAt: expires, AllowMultiple: allowMultiple, DeleteAt: deleteAt,
 		}, ctx.User.GitHubID)
 		if err != nil {
 			return nil, err
@@ -183,6 +190,8 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			"id": form.ID, "slug": form.Slug, "ref": form.Ref,
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
+			"expires_at": isoOrEmpty(form.ExpiresAt), "delete_at": isoOrEmpty(form.DeleteAt),
+			"created_by": form.CreatedBy, "can_manage": true,
 		}), nil
 
 	case "list_forms":
@@ -197,7 +206,8 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 				"id": f.ID, "title": f.Title, "slug": f.Slug, "ref": f.Ref,
 				"url": f.publicURL(a.cfg.BaseURL), "results_url": f.resultsURL(a.cfg.BaseURL),
 				"owner_team": f.OwnerTeam, "status": f.Status, "submissions": n,
-				"expires_at": isoOrEmpty(f.ExpiresAt), "created_at": isoMs(f.CreatedAt),
+				"expires_at": isoOrEmpty(f.ExpiresAt), "delete_at": isoOrEmpty(f.DeleteAt),
+				"created_at": isoMs(f.CreatedAt), "created_by": f.CreatedBy, "can_manage": ctx.canManage(f),
 			})
 		}
 		return toolJSON(map[string]any{"forms": out}), nil
@@ -213,11 +223,12 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 			"allow_multiple": form.AllowMultiple, "expires_at": isoOrEmpty(form.ExpiresAt),
+			"delete_at": isoOrEmpty(form.DeleteAt), "created_by": form.CreatedBy, "can_manage": ctx.canManage(form),
 			"fields": form.Fields, "submissions": n, "created_at": isoMs(form.CreatedAt),
 		}), nil
 
 	case "update_form":
-		form, err := a.requireForm(args, ctx)
+		form, err := a.requireManagedForm(args, ctx)
 		if err != nil {
 			return a.formAccessErr(err)
 		}
@@ -227,6 +238,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			Ref         *string     `json:"ref"`
 			Status      *string     `json:"status"`
 			ExpiresAt   *string     `json:"expires_at"`
+			DeleteAt    *string     `json:"delete_at"`
 			Fields      *[]FieldDef `json:"fields"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
@@ -240,14 +252,21 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			}
 			patch.ExpiresAt = &ms
 		}
+		if in.DeleteAt != nil {
+			ms, err := parseExpiry(*in.DeleteAt)
+			if err != nil {
+				return nil, err
+			}
+			patch.DeleteAt = &ms
+		}
 		updated, err := a.updateForm(form.ID, patch)
 		if err != nil {
-			return nil, err
+			return toolErr(err.Error()), nil
 		}
-		return toolJSON(map[string]any{"id": updated.ID, "status": updated.Status, "title": updated.Title, "expires_at": isoOrEmpty(updated.ExpiresAt)}), nil
+		return toolJSON(map[string]any{"id": updated.ID, "status": updated.Status, "title": updated.Title, "expires_at": isoOrEmpty(updated.ExpiresAt), "delete_at": isoOrEmpty(updated.DeleteAt)}), nil
 
 	case "disable_form":
-		form, err := a.requireForm(args, ctx)
+		form, err := a.requireManagedForm(args, ctx)
 		if err != nil {
 			return a.formAccessErr(err)
 		}
@@ -258,7 +277,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		return toolText("Umfrage " + form.ID + " deaktiviert."), nil
 
 	case "delete_form":
-		form, err := a.requireForm(args, ctx)
+		form, err := a.requireManagedForm(args, ctx)
 		if err != nil {
 			return a.formAccessErr(err)
 		}
@@ -330,8 +349,10 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		if formID == "" {
 			return toolErr("Einsendung nicht gefunden"), nil
 		}
-		if _, err := a.formByIDForUser(formID, ctx); err != nil {
+		if f, err := a.formByIDForUser(formID, ctx); err != nil {
 			return a.formAccessErr(err)
+		} else if !ctx.canManage(f) {
+			return a.formAccessErr(errFormNotManager)
 		}
 		if _, err := a.deleteSubmission(in.ID); err != nil {
 			return nil, err
@@ -344,9 +365,23 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 }
 
 var (
-	errFormNotFound  = fmt.Errorf("not_found")
-	errFormForbidden = fmt.Errorf("forbidden")
+	errFormNotFound   = fmt.Errorf("not_found")
+	errFormForbidden  = fmt.Errorf("forbidden")
+	errFormNotManager = fmt.Errorf("not_manager")
 )
+
+// requireManagedForm: like requireForm, but only for the creator or a team
+// maintainer — the callers that change or delete something.
+func (a *App) requireManagedForm(args json.RawMessage, ctx *AuthContext) (*Form, error) {
+	form, err := a.requireForm(args, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ctx.canManage(form) {
+		return nil, errFormNotManager
+	}
+	return form, nil
+}
 
 func (a *App) requireForm(args json.RawMessage, ctx *AuthContext) (*Form, error) {
 	var in struct {
@@ -363,7 +398,7 @@ func (a *App) formByIDForUser(id string, ctx *AuthContext) (*Form, error) {
 	if err != nil {
 		return nil, err
 	}
-	if form == nil {
+	if form == nil || form.isDue() {
 		return nil, errFormNotFound
 	}
 	if !ctx.isMember(form.OwnerTeam) {
@@ -378,6 +413,8 @@ func (a *App) formAccessErr(err error) (map[string]any, error) {
 		return toolErr("Umfrage nicht gefunden"), nil
 	case errFormForbidden:
 		return toolErr("Kein Zugriff: die Umfrage gehört einem Team, in dem du nicht Mitglied bist."), nil
+	case errFormNotManager:
+		return toolErr("Nur wer die Umfrage angelegt hat (oder Maintainer des Teams ist) darf sie ändern oder löschen. Ergebnisse lesen dürfen alle Mitglieder."), nil
 	default:
 		return nil, err
 	}
