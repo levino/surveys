@@ -31,6 +31,28 @@ func (c *AuthContext) isMember(team string) bool {
 	return false
 }
 
+func (c *AuthContext) isMaintainer(team string) bool {
+	for _, t := range c.Teams {
+		if t.Slug == team {
+			return t.IsMaintainer
+		}
+	}
+	return false
+}
+
+// canManage: who may change or delete a survey (and its submissions).
+// The creator always can; a team maintainer (e.g. the class's `admin` role)
+// can for surveys of that team. Plain team members may only read.
+func (c *AuthContext) canManage(f *Form) bool {
+	if c == nil || c.User == nil || f == nil {
+		return false
+	}
+	if f.CreatedBy != "" && f.CreatedBy == c.User.GitHubID {
+		return true
+	}
+	return c.isMaintainer(f.OwnerTeam)
+}
+
 func (c *AuthContext) teamSlugs() []string {
 	out := make([]string, 0, len(c.Teams))
 	for _, t := range c.Teams {

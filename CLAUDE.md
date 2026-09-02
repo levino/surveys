@@ -14,7 +14,15 @@ CSS. See `README.md` for the user-facing overview and configuration.
 - **Auth** (`oauth.go`, `oauth_routes.go`, `oidc.go`, `auth.go`): own OAuth 2.0
   AS for MCP clients (dynamic registration + PKCE); login delegated to an
   upstream OIDC provider. A survey is owned by a `groups`-claim team.
+- **Authorization** (`auth.go` `canManage`): team members read; the creator
+  or a team maintainer (`IsMaintainer`, from `OIDC_MAINTAINER_SUFFIX`) writes.
+  Mutating tools go through `requireManagedForm`; never add a global admin.
+- **Retention** (`forms.go` `purgeDueForms`, `main.go` sweeper): `delete_at`
+  per survey, default from `DEFAULT_RETENTION_DAYS`; due surveys are hidden by
+  `isDue()`/`notDue` before the hourly purge removes them (submissions cascade).
 - **Persistence** (`db.go`): SQLite (modernc, CGO-free), single writer.
+  Schema changes: add the column to `schema` AND an idempotent `ALTER TABLE`
+  in `migrate()` (existing databases), then extend `formCols`/`scanForm`.
 - **Markdown** (`md.go`): goldmark renders description + field `help`; raw HTML
   is escaped (not unsafe).
 

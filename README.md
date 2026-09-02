@@ -12,8 +12,17 @@ Two surfaces, nothing more:
    operations (create/edit surveys, read/export submissions) happen here, driven
    by an AI assistant such as Claude. **No REST API, no admin UI.**
 
-A survey belongs to a **group/team** taken from the OIDC `groups` claim; only
-members of that group can manage it and read results. The form description and
+A survey belongs to a **group/team** taken from the OIDC `groups` claim. Every
+member of that team sees it and can read its results; **changing or deleting
+it is reserved for whoever created it** — and for the team's *maintainers*,
+if the provider marks any (see `OIDC_MAINTAINER_SUFFIX`). Nobody is a global
+admin: a maintainer of one team sees nothing of another.
+
+Surveys are meant to be short-lived. Each one carries an optional `delete_at`;
+when it passes, the survey **and all its submissions** are purged
+automatically (checked at start and hourly). `DEFAULT_RETENTION_DAYS` gives
+new surveys a deletion date unless the creator sets one explicitly — set it
+wherever data minimisation matters. The form description and
 each field's `help` text support **Markdown**. A built-in usage guide is served
 at `/docs`.
 
@@ -45,6 +54,9 @@ the bare slug.
 | `OIDC_CLIENT_ID`      | `surveys`               | OIDC client id |
 | `OIDC_CLIENT_SECRET`  | –                       | OIDC client secret (required) |
 | `OIDC_GROUP_PREFIX`   | `` (empty)              | Prefix stripped from `groups` to form the team slug |
+| `OIDC_MAINTAINER_SUFFIX` | `` (empty)           | A group ending in this suffix (e.g. `:admin`) makes the user a maintainer of the team named by the rest — maintainers may change/delete every survey of that team |
+| `OIDC_SCOPES`         | `openid profile email groups` | Scopes requested at login. Drop `groups` when the claim is added by the provider itself (ZITADEL action) |
+| `DEFAULT_RETENTION_DAYS` | `0`                  | New surveys get `delete_at = now + N days` unless set explicitly. `0` = keep until deleted by hand |
 | `SESSION_SECRET`      | –                       | Salt for IP hashing (GDPR) |
 
 See `.env.example`.
@@ -71,6 +83,17 @@ Register a client at your provider:
 - Scopes: `openid profile email groups`
 
 The `groups` claim must carry the user's team/group membership.
+
+### ZITADEL without a `groups` scope
+
+ZITADEL keeps project roles in a nested claim and an OIDC client only sees the
+roles of *its own* project. To use one instance for several teams (e.g. one
+school, classes as teams), add a ZITADEL **Action** on the *Complement Token*
+flow (triggers *Pre Userinfo creation* + *Pre access token creation*) that
+flattens the user's grants into `groups`, e.g. `["klasse-wiesen",
+"klasse-wiesen:admin"]`, and run with `OIDC_SCOPES="openid profile email"`,
+`OIDC_GROUP_PREFIX=""`, `OIDC_MAINTAINER_SUFFIX=":admin"`. The client needs
+*ID token userinfo assertion* enabled so the claim lands in the ID token.
 
 ## MCP in Claude
 

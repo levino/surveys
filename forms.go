@@ -42,6 +42,9 @@ type Form struct {
 	ExpiresAt     int64      `json:"expires_at,omitempty"`
 	CreatedBy     string     `json:"created_by,omitempty"`
 	CreatedAt     int64      `json:"created_at"`
+	// DeleteAt: the survey and ALL its submissions are purged after this
+	// point (data minimisation). 0 = keep until deleted by hand.
+	DeleteAt int64 `json:"delete_at,omitempty"`
 }
 
 func (f *Form) publicURL(base string) string { return base + "/f/" + f.Slug }
@@ -51,6 +54,9 @@ func (f *Form) resultsURL(base string) string { return base + "/surveys/" + f.Re
 func (f *Form) isExpired() bool { return f.ExpiresAt != 0 && f.ExpiresAt < nowMs() }
 
 func (f *Form) acceptsSubmissions() bool { return f.Status == "active" && !f.isExpired() }
+
+// isDue: past its delete_at — treated as gone even before the sweeper ran.
+func (f *Form) isDue() bool { return f.DeleteAt != 0 && f.DeleteAt < nowMs() }
 
 type Submission struct {
 	ID        string            `json:"id"`
@@ -149,6 +155,7 @@ type createFormInput struct {
 	OwnerTeam     string
 	ExpiresAt     int64
 	AllowMultiple bool
+	DeleteAt      int64
 }
 
 func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
@@ -172,6 +179,7 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 		AllowMultiple: in.AllowMultiple,
 		ExpiresAt:     in.ExpiresAt,
 		CreatedBy:     createdBy,
+		DeleteAt:      in.DeleteAt,
 		CreatedAt:     nowMs(),
 	}
 	am := 0
@@ -184,14 +192,17 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 		refBase = in.Ref
 	}
 
+	if f.DeleteAt == 0 && a.cfg.RetentionDays > 0 {
+		f.DeleteAt = f.CreatedAt + int64(a.cfg.RetentionDays)*24*60*60*1000
+	}
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		f.Slug = randomSlug()
 		f.Ref = a.db.uniqueRef(slugify(refBase), "")
 		_, err := a.db.Exec(
-			`INSERT INTO forms(id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-			f.ID, f.Slug, f.Ref, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt,
+			`INSERT INTO forms(id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			f.ID, f.Slug, f.Ref, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt, msPtr(f.DeleteAt),
 		)
 		if err == nil {
 			return f, nil
@@ -210,19 +221,23 @@ func scanForm(s interface{ Scan(...any) error }) (*Form, error) {
 		ref, desc, createdBy sql.NullString
 		fields               string
 		am                   int
-		expires              sql.NullInt64
+		expires, deleteAt    sql.NullInt64
 	)
-	if err := s.Scan(&f.ID, &f.Slug, &ref, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt); err != nil {
+	if err := s.Scan(&f.ID, &f.Slug, &ref, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt, &deleteAt); err != nil {
 		return nil, err
 	}
 	f.Ref, f.Description, f.CreatedBy = ref.String, desc.String, createdBy.String
 	f.AllowMultiple = am != 0
 	f.ExpiresAt = expires.Int64
+	f.DeleteAt = deleteAt.Int64
 	_ = json.Unmarshal([]byte(fields), &f.Fields)
 	return &f, nil
 }
 
-const formCols = `id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at`
+const formCols = `id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at`
+
+// notDue: SQL fragment hiding surveys whose delete_at has passed.
+const notDue = `(delete_at IS NULL OR delete_at = 0 OR delete_at > ?)`
 
 func (a *App) getFormByRef(ref string) (*Form, error) {
 	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE ref = ?`, ref)
@@ -261,7 +276,8 @@ func (a *App) listFormsForTeams(teams []string) ([]*Form, error) {
 		ph[i] = "?"
 		args[i] = t
 	}
-	rows, err := a.db.Query(`SELECT `+formCols+` FROM forms WHERE owner_team IN (`+strings.Join(ph, ",")+`) ORDER BY created_at DESC`, args...)
+	args = append(args, nowMs())
+	rows, err := a.db.Query(`SELECT `+formCols+` FROM forms WHERE owner_team IN (`+strings.Join(ph, ",")+`) AND `+notDue+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +299,7 @@ type formPatch struct {
 	Ref         *string
 	Status      *string
 	ExpiresAt   *int64
+	DeleteAt    *int64
 	Fields      *[]FieldDef
 }
 
@@ -309,6 +326,12 @@ func (a *App) updateForm(id string, p formPatch) (*Form, error) {
 	if p.ExpiresAt != nil {
 		f.ExpiresAt = *p.ExpiresAt
 	}
+	if p.DeleteAt != nil {
+		if *p.DeleteAt == 0 && a.cfg.RetentionDays > 0 {
+			return nil, fmt.Errorf("delete_at kann nicht entfernt werden: es gilt eine Standard-Aufbewahrung von %d Tagen — setze ein späteres Datum", a.cfg.RetentionDays)
+		}
+		f.DeleteAt = *p.DeleteAt
+	}
 	if p.Fields != nil {
 		if err := validateFieldDefs(*p.Fields); err != nil {
 			return nil, err
@@ -317,13 +340,23 @@ func (a *App) updateForm(id string, p formPatch) (*Form, error) {
 	}
 	fieldsJSON, _ := json.Marshal(f.Fields)
 	_, err = a.db.Exec(
-		`UPDATE forms SET title=?, description=?, ref=?, status=?, expires_at=?, fields=? WHERE id=?`,
-		f.Title, nullStr(f.Description), f.Ref, f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), id,
+		`UPDATE forms SET title=?, description=?, ref=?, status=?, expires_at=?, fields=?, delete_at=? WHERE id=?`,
+		f.Title, nullStr(f.Description), f.Ref, f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), msPtr(f.DeleteAt), id,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return f, nil
+}
+
+// purgeDueForms deletes every survey whose delete_at has passed, together
+// with its submissions (ON DELETE CASCADE). Run at start and hourly.
+func (a *App) purgeDueForms() (int64, error) {
+	res, err := a.db.Exec(`DELETE FROM forms WHERE delete_at IS NOT NULL AND delete_at > 0 AND delete_at < ?`, nowMs())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (a *App) deleteForm(id string) (bool, error) {

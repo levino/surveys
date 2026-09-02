@@ -64,7 +64,7 @@ func (a *App) formForWeb(w http.ResponseWriter, r *http.Request) (*AuthContext, 
 		http.Error(w, "error", 500)
 		return nil, nil, false
 	}
-	if form == nil || !ctx.isMember(form.OwnerTeam) {
+	if form == nil || form.isDue() || !ctx.isMember(form.OwnerTeam) {
 		a.notice(w, r, 404, "Nicht gefunden", "Diese Umfrage existiert nicht oder du hast keinen Zugriff darauf.")
 		return nil, nil, false
 	}
@@ -155,7 +155,7 @@ func (a *App) handleFormGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "error", 500)
 		return
 	}
-	if form == nil {
+	if form == nil || form.isDue() {
 		a.notice(w, r, 404, "Nicht gefunden", "Dieser Link ist ungültig oder die Umfrage wurde entfernt.")
 		return
 	}
@@ -176,7 +176,7 @@ func (a *App) handleFormPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "error", 500)
 		return
 	}
-	if form == nil {
+	if form == nil || form.isDue() {
 		a.notice(w, r, 404, "Nicht gefunden", "Dieser Link ist ungültig.")
 		return
 	}
