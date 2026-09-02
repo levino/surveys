@@ -34,8 +34,12 @@ func rawOrNull(id json.RawMessage) any {
 var bearerRe = regexp.MustCompile(`^Bearer\s+(\S+)$`)
 
 func (a *App) wwwAuthenticate(w http.ResponseWriter) {
+	// The 401 + this header is the whole protocol signal that makes Claude show
+	// its Connect card and start OAuth; scope tells it what to ask for.
 	w.Header().Set("WWW-Authenticate",
-		`Bearer realm="mcp", resource_metadata="`+a.cfg.BaseURL+`/.well-known/oauth-protected-resource"`)
+		`Bearer error="invalid_token", error_description="Authentication required", `+
+			`resource_metadata="`+a.cfg.BaseURL+`/.well-known/oauth-protected-resource/mcp", `+
+			`scope="`+defaultScope+`"`)
 }
 
 func (a *App) mountMcp(mux *http.ServeMux) {

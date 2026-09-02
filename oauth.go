@@ -43,62 +43,13 @@ type OAuthClient struct {
 	CreatedAt     int64
 }
 
-type registerClientInput struct {
-	RedirectURIs            []string
-	ClientName              string
-	TokenEndpointAuthMethod string
-	GrantTypes              []string
-}
-
-func (a *App) registerClient(in registerClientInput) (*OAuthClient, error) {
-	if len(in.RedirectURIs) == 0 {
-		return nil, newHTTPError(400, "invalid_redirect_uri", "redirect_uris required")
-	}
-	for _, u := range in.RedirectURIs {
-		if err := validateRedirectURI(u); err != nil {
-			return nil, err
-		}
-	}
-	method := in.TokenEndpointAuthMethod
-	if method == "" {
-		method = "none"
-	}
-	if method != "none" && method != "client_secret_post" {
-		return nil, newHTTPError(400, "invalid_client_metadata", "token_endpoint_auth_method not supported")
-	}
-	grants := in.GrantTypes
-	if len(grants) == 0 {
-		grants = []string{"authorization_code", "refresh_token"}
-	}
-	c := &OAuthClient{
-		ClientID:      genID("cli"),
-		ClientName:    in.ClientName,
-		RedirectURIs:  in.RedirectURIs,
-		GrantTypes:    grants,
-		TokenAuthMeth: method,
-		CreatedAt:     nowMs(),
-	}
-	if method == "client_secret_post" {
-		c.ClientSecret = genID("sec")
-	}
-	ru, _ := json.Marshal(c.RedirectURIs)
-	gt, _ := json.Marshal(c.GrantTypes)
-	var secret any
-	if c.ClientSecret != "" {
-		secret = c.ClientSecret
-	}
-	_, err := a.db.Exec(
-		`INSERT INTO oauth_clients(client_id, client_secret, client_name, redirect_uris, grant_types, token_auth_method, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		c.ClientID, secret, nullStr(c.ClientName), string(ru), string(gt), c.TokenAuthMeth, c.CreatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
+// getClient resolves a CIMD client (see cimd.go). Unknown ids yield nil.
 func (a *App) getClient(clientID string) (*OAuthClient, error) {
+	return a.resolveClient(clientID)
+}
+
+// loadPersistedClient reads the last-good metadata copy from oauth_clients.
+func (a *App) loadPersistedClient(clientID string) (*OAuthClient, error) {
 	var (
 		c      OAuthClient
 		secret sql.NullString
@@ -150,10 +101,13 @@ func (a *App) beginAuthz(in beginAuthzInput) (*PendingAuthz, error) {
 		return nil, err
 	}
 	if client == nil {
-		return nil, newHTTPError(400, "invalid_client", "unknown client_id")
+		return nil, newHTTPError(400, "invalid_client", "client_id must be an https URL serving a client metadata document")
 	}
-	if !contains(client.RedirectURIs, in.RedirectURI) {
+	if !redirectURIAllowed(client.RedirectURIs, in.RedirectURI) {
 		return nil, newHTTPError(400, "invalid_redirect_uri", "redirect_uri not registered")
+	}
+	if err := a.checkResource(in.Resource); err != nil {
+		return nil, err
 	}
 	if in.ResponseType != "code" {
 		return nil, newHTTPError(400, "unsupported_response_type", "only \"code\" supported")
@@ -259,10 +213,10 @@ type IssuedTokens struct {
 
 type exchangeCodeInput struct {
 	ClientID     string
-	ClientSecret string
 	Code         string
 	RedirectURI  string
 	CodeVerifier string
+	Resource     string
 }
 
 func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, error) {
@@ -272,11 +226,6 @@ func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, er
 	}
 	if client == nil {
 		return nil, newHTTPError(401, "invalid_client", "unknown client")
-	}
-	if client.TokenAuthMeth == "client_secret_post" {
-		if in.ClientSecret == "" || in.ClientSecret != client.ClientSecret {
-			return nil, newHTTPError(401, "invalid_client", "client authentication failed")
-		}
 	}
 
 	var (
@@ -311,6 +260,9 @@ func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, er
 	if !verifyPKCE(challenge, method, in.CodeVerifier) {
 		return nil, newHTTPError(400, "invalid_grant", "PKCE verification failed")
 	}
+	if err := a.checkResource(in.Resource); err != nil {
+		return nil, err
+	}
 	if _, err := a.db.Exec(`UPDATE oauth_codes SET used = 1 WHERE code = ?`, in.Code); err != nil {
 		return nil, err
 	}
@@ -319,7 +271,6 @@ func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, er
 
 type exchangeRefreshInput struct {
 	ClientID     string
-	ClientSecret string
 	RefreshToken string
 }
 
@@ -330,11 +281,6 @@ func (a *App) exchangeRefreshToken(in exchangeRefreshInput) (*IssuedTokens, erro
 	}
 	if client == nil {
 		return nil, newHTTPError(401, "invalid_client", "unknown client")
-	}
-	if client.TokenAuthMeth == "client_secret_post" {
-		if in.ClientSecret == "" || in.ClientSecret != client.ClientSecret {
-			return nil, newHTTPError(401, "invalid_client", "client authentication failed")
-		}
 	}
 	var (
 		clientID, githubID string
@@ -496,6 +442,59 @@ func validateRedirectURI(uri string) error {
 		}
 	}
 	return nil
+}
+
+// mcpResource is the canonical URI of the MCP server (RFC 8707 resource).
+func (a *App) mcpResource() string { return strings.TrimRight(a.cfg.BaseURL, "/") + "/mcp" }
+
+// checkResource validates an RFC 8707 resource indicator, if the client sent
+// one: tokens minted here are only ever valid for this MCP server.
+func (a *App) checkResource(resource string) error {
+	if resource == "" {
+		return nil
+	}
+	want, _ := url.Parse(a.mcpResource())
+	got, err := url.Parse(resource)
+	if err != nil || got.Fragment != "" ||
+		!strings.EqualFold(got.Scheme, want.Scheme) || !strings.EqualFold(got.Host, want.Host) ||
+		strings.TrimRight(got.Path, "/") != strings.TrimRight(want.Path, "/") {
+		return newHTTPError(400, "invalid_target", "resource must be "+a.mcpResource())
+	}
+	return nil
+}
+
+// isLoopback: the redirect targets a native app on this machine.
+func isLoopback(u *url.URL) bool {
+	if u.Scheme != "http" {
+		return false
+	}
+	h := u.Hostname()
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// redirectURIAllowed compares the presented redirect_uri with the registered
+// ones: exact string match, except for loopback redirects, which native
+// clients bind to an ephemeral port at runtime (RFC 8252 §7.3) — there the
+// port is ignored. Claude Code declares http://localhost/callback and
+// http://127.0.0.1/callback and relies on exactly this.
+func redirectURIAllowed(registered []string, presented string) bool {
+	if contains(registered, presented) {
+		return true
+	}
+	p, err := url.Parse(presented)
+	if err != nil || !isLoopback(p) {
+		return false
+	}
+	for _, r := range registered {
+		ru, err := url.Parse(r)
+		if err != nil || !isLoopback(ru) {
+			continue
+		}
+		if ru.Hostname() == p.Hostname() && ru.Path == p.Path {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(list []string, v string) bool {

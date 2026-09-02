@@ -11,9 +11,14 @@ CSS. See `README.md` for the user-facing overview and configuration.
   server-side (`validateSubmission` in `forms.go`, the source of truth).
 - **MCP endpoint** (`mcp.go`, `tools.go`): the only authenticated surface. Tool
   definitions live in `toolDefs()`, dispatch in `callTool`.
-- **Auth** (`oauth.go`, `oauth_routes.go`, `oidc.go`, `auth.go`): own OAuth 2.0
-  AS for MCP clients (dynamic registration + PKCE); login delegated to an
-  upstream OIDC provider. A survey is owned by a `groups`-claim team.
+- **Auth** (`oauth.go`, `oauth_routes.go`, `cimd.go`, `oidc.go`, `auth.go`):
+  own OAuth 2.1 AS for MCP clients — Client ID Metadata Documents only (no
+  dynamic registration, public clients + PKCE S256), login delegated to an
+  upstream OIDC provider. `resolveClient` fetches/caches/persists the metadata
+  document; `redirectURIAllowed` is exact-match except loopback (port
+  ignored). Discovery lives in `mountOauth`: keep the two flags Claude keys on
+  (`client_id_metadata_document_supported`, `"none"` auth method), the
+  path-suffixed PRM and the `WWW-Authenticate` challenge in `mcp.go` intact.
 - **Teams** come either from the `groups` claim cached at login (`user_teams`)
   or, when `ZITADEL_*` is configured, from a live grants lookup on every
   request (`zitadel.go`, wired in `contextForUser`). Prefer the lookup; it is

@@ -84,7 +84,47 @@ func newTestApp(t *testing.T, oidc *httptest.Server) *App {
 		Scopes:           "openid profile email groups",
 		SessionSecret:    "test-secret",
 	}
-	return newApp(cfg, db)
+	app := newApp(cfg, db)
+	app.cimdAllowLocal = true
+	return app
+}
+
+// cimdDoc serves a Client ID Metadata Document and returns its URL (= the
+// client_id). redirects default to a same-origin callback on the doc host.
+type cimdDoc struct {
+	srv       *httptest.Server
+	url       string
+	mu        sync.Mutex
+	redirects []string
+	selfID    string // what the document claims as client_id
+	down      bool
+	hits      int
+}
+
+func newCIMDDoc(t *testing.T, name string) *cimdDoc {
+	t.Helper()
+	d := &cimdDoc{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /oauth/client.json", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.hits++
+		if d.down {
+			w.WriteHeader(503)
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=3600")
+		writeJSON(w, 200, map[string]any{
+			"client_id": d.selfID, "client_name": name, "redirect_uris": d.redirects,
+			"grant_types": []string{"authorization_code", "refresh_token"}, "token_endpoint_auth_method": "none",
+		})
+	})
+	d.srv = httptest.NewServer(mux)
+	t.Cleanup(d.srv.Close)
+	d.url = d.srv.URL + "/oauth/client.json"
+	d.selfID = d.url
+	d.redirects = []string{d.srv.URL + "/cb"}
+	return d
 }
 
 func newTestAppRetention(t *testing.T, oidc *httptest.Server, days int) *App {
@@ -109,7 +149,8 @@ func TestDiscoveryEndpoints(t *testing.T) {
 	}
 	var meta map[string]any
 	json.NewDecoder(res.Body).Decode(&meta)
-	if meta["token_endpoint"] == nil || meta["registration_endpoint"] == nil {
+	if meta["token_endpoint"] == nil || meta["registration_endpoint"] != nil ||
+		meta["client_id_metadata_document_supported"] != true {
 		t.Fatalf("missing AS metadata: %v", meta)
 	}
 
@@ -163,24 +204,16 @@ func fullOAuthToken(t *testing.T, ts *httptest.Server, sid string) string {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-	regBody, _ := json.Marshal(map[string]any{"redirect_uris": []string{"https://claude.ai/cb"}, "client_name": "test"})
-	rr, err := client.Post(ts.URL+"/oauth/register", "application/json", strings.NewReader(string(regBody)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reg map[string]any
-	json.NewDecoder(rr.Body).Decode(&reg)
-	clientID, _ := reg["client_id"].(string)
-	if clientID == "" {
-		t.Fatalf("no client_id from register: %v", reg)
-	}
+	doc := newCIMDDoc(t, "test")
+	clientID, redirect := doc.url, doc.redirects[0]
 
 	verifier := "verifier-abc-123-verifier-abc-123-xxxxxx"
 	au, _ := url.Parse(ts.URL + "/oauth/authorize")
 	q := au.Query()
 	q.Set("client_id", clientID)
-	q.Set("redirect_uri", "https://claude.ai/cb")
+	q.Set("redirect_uri", redirect)
 	q.Set("response_type", "code")
+	q.Set("resource", "http://localhost:8080/mcp") // the configured BaseURL, not the test listener
 	q.Set("code_challenge", b64Challenge(verifier))
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", "xyz")
@@ -223,8 +256,9 @@ func fullOAuthToken(t *testing.T, ts *httptest.Server, sid string) string {
 	form.Set("grant_type", "authorization_code")
 	form.Set("client_id", clientID)
 	form.Set("code", code)
-	form.Set("redirect_uri", "https://claude.ai/cb")
+	form.Set("redirect_uri", redirect)
 	form.Set("code_verifier", verifier)
+	form.Set("resource", "http://localhost:8080/mcp")
 	tr, err := client.Post(ts.URL+"/oauth/token", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -766,5 +800,126 @@ func TestZitadelRuntimeGrants(t *testing.T) {
 	teams = toolResultText(t, mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
 	if strings.Contains(teams, `"klasse-a"`) {
 		t.Fatalf("with ZITADEL down nobody may keep teams, got %s", teams)
+	}
+}
+
+// What Claude needs to pick CIMD on its own, and the RFC 9728 chain from 401.
+func TestDiscoveryForCIMDClients(t *testing.T) {
+	app := newTestApp(t, newOIDCMock(t))
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+
+	res, _ := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	wa := res.Header.Get("WWW-Authenticate")
+	if res.StatusCode != 401 || !strings.Contains(wa, `resource_metadata="`+"http://localhost:8080"+`/.well-known/oauth-protected-resource/mcp"`) || !strings.Contains(wa, `scope="mcp"`) || !strings.Contains(wa, `error="invalid_token"`) {
+		t.Fatalf("401 challenge wrong: %d %q", res.StatusCode, wa)
+	}
+	for _, p := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"} {
+		r, _ := http.Get(ts.URL + p)
+		var prm map[string]any
+		json.NewDecoder(r.Body).Decode(&prm)
+		if r.StatusCode != 200 || prm["resource"] != "http://localhost:8080/mcp" || prm["authorization_servers"].([]any)[0] != "http://localhost:8080" {
+			t.Fatalf("%s: %d %v", p, r.StatusCode, prm)
+		}
+	}
+	for _, p := range []string{"/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"} {
+		r, _ := http.Get(ts.URL + p)
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		methods, _ := m["token_endpoint_auth_methods_supported"].([]any)
+		if m["client_id_metadata_document_supported"] != true || len(methods) != 1 || methods[0] != "none" ||
+			m["code_challenge_methods_supported"].([]any)[0] != "S256" || m["registration_endpoint"] != nil {
+			t.Fatalf("%s: not CIMD-ready: %v", p, m)
+		}
+	}
+}
+
+// Client ID Metadata Documents: validation, loopback ports, resource, outages.
+func TestCIMDClientRules(t *testing.T) {
+	oidc := newOIDCMock(t, mockUser{sub: "alice", name: "Alice", groups: []string{"acme:marketing"}})
+	app := newTestApp(t, oidc)
+	ts := httptest.NewServer(app.routes())
+	defer ts.Close()
+	_, sid, _ := app.loginViaOIDC("code-alice", "agent")
+
+	authorize := func(clientID, redirect, resource string) *http.Response {
+		au, _ := url.Parse(ts.URL + "/oauth/authorize")
+		q := au.Query()
+		q.Set("client_id", clientID)
+		q.Set("redirect_uri", redirect)
+		q.Set("response_type", "code")
+		q.Set("code_challenge", b64Challenge("verifier-abc-123-verifier-abc-123-xxxxxx"))
+		q.Set("code_challenge_method", "S256")
+		if resource != "" {
+			q.Set("resource", resource)
+		}
+		au.RawQuery = q.Encode()
+		req, _ := http.NewRequest("GET", au.String(), nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+		res, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	body := func(r *http.Response) string { b, _ := io.ReadAll(r.Body); return string(b) }
+
+	// not a URL -> unknown client
+	if r := authorize("cli_123", "https://x/cb", ""); r.StatusCode != 400 || !strings.Contains(body(r), "invalid_client") {
+		t.Fatalf("opaque client_id must be rejected, got %d", r.StatusCode)
+	}
+	// document must be self-referential
+	bad := newCIMDDoc(t, "Evil")
+	bad.selfID = "https://someone-else.example/client.json"
+	if r := authorize(bad.url, bad.redirects[0], ""); r.StatusCode != 400 {
+		t.Fatalf("client_id mismatch must be rejected, got %d %s", r.StatusCode, body(r))
+	}
+	// redirect must be in the document
+	good := newCIMDDoc(t, "Claude")
+	if r := authorize(good.url, good.srv.URL+"/other", ""); r.StatusCode != 400 || !strings.Contains(body(r), "invalid_redirect_uri") {
+		t.Fatalf("unregistered redirect must be rejected, got %d", r.StatusCode)
+	}
+	// consent shows the client_id host, not just the self-asserted name
+	r := authorize(good.url, good.redirects[0], "")
+	if b := body(r); r.StatusCode != 200 || !strings.Contains(b, good.srv.Listener.Addr().String()) || !strings.Contains(b, "Claude") {
+		t.Fatalf("consent must show the client host: %d %s", r.StatusCode, b[:min(len(b), 300)])
+	}
+	// wrong resource indicator
+	if r := authorize(good.url, good.redirects[0], "https://other.example/mcp"); r.StatusCode != 400 || !strings.Contains(body(r), "invalid_target") {
+		t.Fatalf("foreign resource must be rejected, got %d", r.StatusCode)
+	}
+	// loopback redirects: port ignored (Claude Code), non-loopback foreign origin refused in the doc
+	native := newCIMDDoc(t, "Claude Code")
+	native.redirects = []string{"http://localhost/callback", "http://127.0.0.1/callback"}
+	if r := authorize(native.url, "http://localhost:3118/callback", ""); r.StatusCode != 200 || !strings.Contains(body(r), "eigenen Rechner") {
+		t.Fatalf("loopback with ephemeral port must be accepted with a warning, got %d", r.StatusCode)
+	}
+	if r := authorize(native.url, "http://localhost:3118/elsewhere", ""); r.StatusCode != 400 {
+		t.Fatalf("loopback with other path must be rejected, got %d", r.StatusCode)
+	}
+	foreign := newCIMDDoc(t, "Phish")
+	foreign.redirects = []string{"https://attacker.example/cb"}
+	if r := authorize(foreign.url, "https://attacker.example/cb", ""); r.StatusCode != 400 {
+		t.Fatalf("cross-origin redirect in the document must be rejected, got %d", r.StatusCode)
+	}
+	// outage after a successful fetch: the persisted copy keeps the client working
+	before := good.hits
+	good.mu.Lock()
+	good.down = true
+	good.mu.Unlock()
+	app.cimd.entries = map[string]cimdEntry{}
+	if r := authorize(good.url, good.redirects[0], ""); r.StatusCode != 200 {
+		t.Fatalf("stale copy must be used during an outage, got %d %s", r.StatusCode, body(r))
+	}
+	if good.hits != before+1 {
+		t.Fatalf("expected one failed refetch, got %d", good.hits-before)
+	}
+	// error responses are never cached: back up -> served again
+	good.mu.Lock()
+	good.down = false
+	good.mu.Unlock()
+	app.cimd.entries = map[string]cimdEntry{}
+	if r := authorize(good.url, good.redirects[0], ""); r.StatusCode != 200 {
+		t.Fatalf("after recovery: %d", r.StatusCode)
 	}
 }
