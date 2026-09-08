@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- Stage 1: build the Tailwind + DaisyUI stylesheet (self-hosted, no CDN) ---
-FROM node:22-bookworm-slim AS css
+FROM node:26-bookworm-slim AS css
 WORKDIR /src
 COPY package.json package-lock.json tailwind.config.js ./
 RUN npm ci --no-audit --no-fund
