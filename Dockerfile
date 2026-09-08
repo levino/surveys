@@ -11,7 +11,7 @@ RUN npm run build:css   # scans ui/**/*.templ → minified assets/app.css
 
 # --- Stage 2: cross-compile a static, CGO-free binary (embeds app.css) ---
 # Runs natively on the BUILD platform and cross-compiles to TARGETARCH.
-FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
