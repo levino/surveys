@@ -1,6 +1,37 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind 4 wird CSS-first konfiguriert: kein tailwind.config.js mehr, sondern
+   @import/@source/@plugin direkt hier. */
+@import "tailwindcss";
+
+/* Ersetzt das frühere `content`-Feld aus tailwind.config.js. Die Klassen stehen
+   in den templ-Vorlagen; Tailwinds Auto-Erkennung kennt `.templ` nicht. */
+@source "../ui/**/*.templ";
+
+/* DaisyUI 5 ist ein CSS-Plugin und wird nicht mehr über require() geladen. */
+@plugin "daisyui" {
+	themes: light, dark;
+	logs: false;
+}
+
+/* Entspricht dem früheren `daisyui.themes`-Eintrag "surveys" (Standard-Theme,
+   siehe PUBLIC_THEME / ui.Theme). Fehlende *-content-Farben erzeugt DaisyUI 5
+   selbst. */
+@plugin "daisyui/theme" {
+	name: "surveys";
+	default: true;
+	color-scheme: light;
+	--color-primary: #2563eb;
+	--color-primary-content: #ffffff;
+	--color-secondary: #64748b;
+	--color-accent: #16a34a;
+	--color-neutral: #1f2937;
+	--color-base-100: #ffffff;
+	--color-base-200: #f6f7f9;
+	--color-base-300: #e5e7eb;
+	--color-info: #0ea5e9;
+	--color-success: #16a34a;
+	--color-warning: #f59e0b;
+	--color-error: #dc2626;
+}
 
 /* Restore sensible typography inside rendered Markdown (.md) blocks, which
    Tailwind's preflight would otherwise strip (list bullets, heading sizes). */
@@ -31,7 +62,8 @@
 }
 .md a {
 	text-decoration: underline;
-	color: hsl(var(--p));
+	/* DaisyUI 5 liefert fertige Farben statt HSL-Kanälen (früher hsl(var(--p))). */
+	color: var(--color-primary);
 }
 .md strong {
 	font-weight: 600;
@@ -42,7 +74,7 @@
 .md code {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 0.9em;
-	background: hsl(var(--b3));
+	background: var(--color-base-300);
 	padding: 0.05em 0.3em;
 	border-radius: 0.25rem;
 }

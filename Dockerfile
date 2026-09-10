@@ -3,11 +3,11 @@
 # --- Stage 1: build the Tailwind + DaisyUI stylesheet (self-hosted, no CDN) ---
 FROM node:26-bookworm-slim AS css
 WORKDIR /src
-COPY package.json package-lock.json tailwind.config.js ./
+COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY assets/input.css ./assets/input.css
 COPY ui ./ui
-RUN npm run build:css   # scans ui/**/*.templ → minified assets/app.css
+RUN npm run build:css   # scans ui/**/*.templ (via @source in input.css) → minified assets/app.css
 
 # --- Stage 2: cross-compile a static, CGO-free binary (embeds app.css) ---
 # Runs natively on the BUILD platform and cross-compiles to TARGETARCH.
