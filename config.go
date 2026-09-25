@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,13 +33,15 @@ type Config struct {
 	// unless the creator sets an explicit delete_at. 0 = keep forever.
 	RetentionDays int
 
-	// Runtime team lookup at ZITADEL (see zitadel.go). When ZitadelServiceToken
-	// and ZitadelTeamProjects are set, the `groups` claim is ignored and every
-	// request asks ZITADEL who the user is a member of.
-	ZitadelOrgID          string
-	ZitadelServiceToken   string
+	// Teams from ZITADEL project roles in the user's own tokens (see
+	// zitadel.go). When ZitadelTeamProjects is set, the `groups` claim is
+	// ignored and the login requests the ZITADEL role/audience scopes.
 	ZitadelTeamProjects   map[string]string
 	ZitadelMaintainerRole string
+
+	// How old the provider tokens of a session may get before the next use
+	// refreshes them (and re-derives the teams).
+	RefreshInterval time.Duration
 }
 
 func env(key, def string) string {
@@ -61,14 +64,41 @@ func loadConfig() Config {
 		OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
 		GroupPrefix:      env("OIDC_GROUP_PREFIX", ""),
 		MaintainerSuffix: env("OIDC_MAINTAINER_SUFFIX", ""),
-		Scopes:           env("OIDC_SCOPES", "openid profile email groups"),
+		Scopes:           env("OIDC_SCOPES", "openid profile email offline_access groups"),
 		RetentionDays:    envInt("DEFAULT_RETENTION_DAYS", 0),
 
-		ZitadelOrgID:          env("ZITADEL_ORG_ID", ""),
-		ZitadelServiceToken:   os.Getenv("ZITADEL_SERVICE_TOKEN"),
 		ZitadelTeamProjects:   parseTeamProjects(env("ZITADEL_TEAM_PROJECTS", "")),
 		ZitadelMaintainerRole: env("ZITADEL_MAINTAINER_ROLE", "admin"),
+		RefreshInterval:       envDuration("OIDC_REFRESH_INTERVAL", 10*time.Minute),
 	}
+}
+
+// warnDeprecated logs (once, at start) about settings that are still
+// accepted but no longer do anything, so old deployments keep starting.
+func warnDeprecated() {
+	for _, k := range []string{"ZITADEL_SERVICE_TOKEN", "ZITADEL_ORG_ID"} {
+		if os.Getenv(k) != "" {
+			logJSON("warn", "deprecated setting ignored", map[string]any{
+				"var":    k,
+				"detail": "teams now come from the user's own ZITADEL tokens (project role claims); remove this variable and the service user",
+			})
+		}
+	}
+}
+
+// envDuration accepts a Go duration ("10m", "90s") or plain seconds.
+func envDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n := envInt(key, -1); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return def
 }
 
 func envInt(key string, def int) int {
@@ -87,6 +117,32 @@ func envInt(key string, def int) int {
 }
 
 func (c Config) callbackURL() string { return c.BaseURL + "/login/callback" }
+
+// loginScopes: OIDC_SCOPES plus, with ZITADEL_TEAM_PROJECTS, what the role
+// claims need — offline_access for the refresh token, the projects:roles
+// scope and one audience scope per team project.
+func (c Config) loginScopes() string {
+	scopes := strings.Fields(c.Scopes)
+	add := func(s string) {
+		if !contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+	add("openid")
+	if len(c.ZitadelTeamProjects) > 0 {
+		add("offline_access")
+		add(zitadelScopeProjectsRoles)
+		ids := make([]string, 0, len(c.ZitadelTeamProjects))
+		for id := range c.ZitadelTeamProjects {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			add(zitadelAudScope(id))
+		}
+	}
+	return strings.Join(scopes, " ")
+}
 
 func (c Config) teamFromGroup(group string) string {
 	if c.GroupPrefix != "" && strings.HasPrefix(group, c.GroupPrefix) {
@@ -116,21 +172,25 @@ type App struct {
 	http   *http.Client
 	oidc   *oidcProvider
 	oidcMu sync.Mutex
-	grants *zitadelGrants // nil = teams come from the groups claim at login
+
+	refreshMu    sync.Mutex
+	refreshLocks map[string]*sync.Mutex // idp session id -> serialises its refresh
 
 	cimd           cimdCache
 	cimdAllowLocal bool // tests only: allow http:// and loopback metadata hosts
 }
 
 func newApp(cfg Config, db *DB) *App {
-	client := &http.Client{Timeout: 15 * time.Second}
+	if cfg.RefreshInterval <= 0 {
+		cfg.RefreshInterval = 10 * time.Minute
+	}
 	return &App{
-		cfg:    cfg,
-		db:     db,
-		rl:     newRateLimiter(),
-		http:   client,
-		grants: newZitadelGrants(cfg, client),
-		cimd:   cimdCache{entries: map[string]cimdEntry{}},
+		cfg:          cfg,
+		db:           db,
+		rl:           newRateLimiter(),
+		http:         &http.Client{Timeout: 15 * time.Second},
+		refreshLocks: map[string]*sync.Mutex{},
+		cimd:         cimdCache{entries: map[string]cimdEntry{}},
 	}
 }
 

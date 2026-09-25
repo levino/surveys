@@ -36,9 +36,24 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at   INTEGER NOT NULL,
   expires_at   INTEGER NOT NULL,
   user_agent   TEXT,
-  last_seen_at INTEGER
+  last_seen_at INTEGER,
+  idp_session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
+
+-- One row per login at the OIDC provider. Browser sessions and MCP tokens
+-- point here (idp_session_id); ending it ends all of them.
+CREATE TABLE IF NOT EXISTS idp_sessions (
+  id            TEXT PRIMARY KEY,
+  github_id     TEXT NOT NULL,
+  sid           TEXT,
+  refresh_token TEXT,
+  teams         TEXT NOT NULL DEFAULT '[]',
+  refreshed_at  INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idp_sessions_sid ON idp_sessions(sid);
+CREATE INDEX IF NOT EXISTS idp_sessions_github ON idp_sessions(github_id);
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
   client_id         TEXT PRIMARY KEY,
@@ -73,7 +88,8 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   scope                 TEXT,
   resource              TEXT,
   expires_at            INTEGER NOT NULL,
-  used                  INTEGER NOT NULL DEFAULT 0
+  used                  INTEGER NOT NULL DEFAULT 0,
+  idp_session_id        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -83,7 +99,8 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   github_id  TEXT NOT NULL,
   scope      TEXT,
   expires_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  idp_session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS oauth_tokens_github ON oauth_tokens(github_id);
 
@@ -146,6 +163,19 @@ func openDB(path string) (*DB, error) {
 func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN ref TEXT`)
 	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN delete_at INTEGER`)
+	// Link browser sessions, auth codes and MCP tokens to the provider login.
+	// Rows from before this column have NULL and are no longer accepted.
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN idp_session_id TEXT`)
+	_, _ = db.Exec(`ALTER TABLE oauth_codes ADD COLUMN idp_session_id TEXT`)
+	_, _ = db.Exec(`ALTER TABLE oauth_tokens ADD COLUMN idp_session_id TEXT`)
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS sessions_idp ON sessions(idp_session_id)`,
+		`CREATE INDEX IF NOT EXISTS oauth_tokens_idp ON oauth_tokens(idp_session_id)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
+	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS forms_ref ON forms(ref)`); err != nil {
 		return err
 	}

@@ -33,7 +33,7 @@ func toolDefs() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "list_teams",
-			"description": "Teams (Klassen/Verbände), in denen der angemeldete Nutzer Mitglied ist, mit is_maintainer-Flag, plus die Standard-Aufbewahrung (retention_days) der Instanz. owner_team beim Anlegen einer Umfrage muss eines dieser Teams sein.",
+			"description": "Teams (Klassen/Verbände), in denen der angemeldete Nutzer Mitglied ist, mit is_maintainer-Flag, plus die Standard-Aufbewahrung (retention_days) der Instanz. owner_team beim Anlegen einer Umfrage muss eines dieser Teams sein. Die Mitgliedschaft stammt aus den Tokens des Identity-Providers und wird etwa alle 10 Minuten aufgefrischt: eine neu vergebene oder entzogene Rolle wirkt spätestens dann, eine Abmeldung oder Sperre beim Provider sofort (die Verbindung muss danach neu autorisiert werden).",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{

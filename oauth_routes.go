@@ -115,7 +115,7 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			http.Error(w, "missing authz_id", 400)
 			return
 		}
-		a.finishAuthz(w, r, authzID, auth.User.GitHubID)
+		a.finishAuthz(w, r, authzID, auth.User.GitHubID, auth.IdpSessionID)
 	})
 
 	mux.HandleFunc("POST /oauth/deny", func(w http.ResponseWriter, r *http.Request) {
@@ -201,8 +201,8 @@ func (a *App) renderConsent(w http.ResponseWriter, r *http.Request, authzID stri
 	}))
 }
 
-func (a *App) finishAuthz(w http.ResponseWriter, r *http.Request, authzID, githubID string) {
-	res, err := a.completeAuthz(authzID, githubID)
+func (a *App) finishAuthz(w http.ResponseWriter, r *http.Request, authzID, githubID, idpSessionID string) {
+	res, err := a.completeAuthz(authzID, githubID, idpSessionID)
 	if err != nil {
 		if he, ok := err.(*httpError); ok {
 			http.Error(w, he.code+": "+he.message, he.status)

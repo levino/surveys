@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 )
@@ -179,7 +180,7 @@ type completedAuthz struct {
 	State       string
 }
 
-func (a *App) completeAuthz(authzID, githubID string) (*completedAuthz, error) {
+func (a *App) completeAuthz(authzID, githubID, idpSessionID string) (*completedAuthz, error) {
 	req, err := a.loadAuthzRequest(authzID)
 	if err != nil {
 		return nil, err
@@ -191,10 +192,10 @@ func (a *App) completeAuthz(authzID, githubID string) (*completedAuthz, error) {
 	now := nowMs()
 	_, err = a.db.Exec(
 		`INSERT INTO oauth_codes
-		 (code, client_id, github_id, redirect_uri, code_challenge, code_challenge_method, scope, resource, expires_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		 (code, client_id, github_id, redirect_uri, code_challenge, code_challenge_method, scope, resource, expires_at, idp_session_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		code, req.ClientID, githubID, req.RedirectURI, req.CodeChallenge, req.CodeChallengeMethod,
-		nullStr(req.Scope), nullStr(req.Resource), now+codeTTLMs,
+		nullStr(req.Scope), nullStr(req.Resource), now+codeTTLMs, idpSessionID,
 	)
 	if err != nil {
 		return nil, err
@@ -231,14 +232,14 @@ func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, er
 	var (
 		clientID, githubID, redirectURI string
 		challenge, method               string
-		scope                           sql.NullString
+		scope, idp                      sql.NullString
 		expires                         int64
 		used                            int
 	)
 	err = a.db.QueryRow(
-		`SELECT client_id, github_id, redirect_uri, code_challenge, code_challenge_method, scope, expires_at, used
+		`SELECT client_id, github_id, redirect_uri, code_challenge, code_challenge_method, scope, expires_at, used, idp_session_id
 		 FROM oauth_codes WHERE code = ?`, in.Code,
-	).Scan(&clientID, &githubID, &redirectURI, &challenge, &method, &scope, &expires, &used)
+	).Scan(&clientID, &githubID, &redirectURI, &challenge, &method, &scope, &expires, &used, &idp)
 	if err == sql.ErrNoRows {
 		return nil, newHTTPError(400, "invalid_grant", "unknown code")
 	}
@@ -266,7 +267,10 @@ func (a *App) exchangeAuthorizationCode(in exchangeCodeInput) (*IssuedTokens, er
 	if _, err := a.db.Exec(`UPDATE oauth_codes SET used = 1 WHERE code = ?`, in.Code); err != nil {
 		return nil, err
 	}
-	return a.mintTokens(clientID, githubID, scope.String)
+	if err := a.checkIdpSessionForGrant(idp); err != nil {
+		return nil, err
+	}
+	return a.mintTokens(clientID, githubID, scope.String, idp.String)
 }
 
 type exchangeRefreshInput struct {
@@ -284,14 +288,14 @@ func (a *App) exchangeRefreshToken(in exchangeRefreshInput) (*IssuedTokens, erro
 	}
 	var (
 		clientID, githubID string
-		scope              sql.NullString
+		scope, idp         sql.NullString
 		expires            int64
 		revoked            sql.NullInt64
 	)
 	err = a.db.QueryRow(
-		`SELECT client_id, github_id, scope, expires_at, revoked_at
+		`SELECT client_id, github_id, scope, expires_at, revoked_at, idp_session_id
 		 FROM oauth_tokens WHERE token = ? AND kind = 'refresh'`, in.RefreshToken,
-	).Scan(&clientID, &githubID, &scope, &expires, &revoked)
+	).Scan(&clientID, &githubID, &scope, &expires, &revoked, &idp)
 	if err == sql.ErrNoRows {
 		return nil, newHTTPError(400, "invalid_grant", "unknown refresh token")
 	}
@@ -307,26 +311,51 @@ func (a *App) exchangeRefreshToken(in exchangeRefreshInput) (*IssuedTokens, erro
 	if clientID != in.ClientID {
 		return nil, newHTTPError(400, "invalid_grant", "token/client mismatch")
 	}
+	// Same freshness rule as every MCP call: the provider login behind this
+	// token must still be alive (refreshed if due) before we mint anew.
+	if err := a.checkIdpSessionForGrant(idp); err != nil {
+		return nil, err
+	}
 
 	if _, err := a.db.Exec(`UPDATE oauth_tokens SET revoked_at = ? WHERE token = ?`, nowMs(), in.RefreshToken); err != nil {
 		return nil, err
 	}
-	return a.mintTokens(clientID, githubID, scope.String)
+	return a.mintTokens(clientID, githubID, scope.String, idp.String)
 }
 
-func (a *App) mintTokens(clientID, githubID, scope string) (*IssuedTokens, error) {
+// checkIdpSessionForGrant maps the provider session state onto OAuth errors:
+// gone -> invalid_grant (client must re-authorize), provider down ->
+// temporarily_unavailable (client may retry; nothing is revoked).
+func (a *App) checkIdpSessionForGrant(idp sql.NullString) error {
+	if !idp.Valid || idp.String == "" {
+		return newHTTPError(400, "invalid_grant", "token predates session binding; authorize again")
+	}
+	_, err := a.freshIdpSession(idp.String)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errSessionEnded):
+		return newHTTPError(400, "invalid_grant", "login session ended; authorize again")
+	case errors.Is(err, errIdPUnavailable):
+		return newHTTPError(503, "temporarily_unavailable", "identity provider unavailable")
+	default:
+		return err
+	}
+}
+
+func (a *App) mintTokens(clientID, githubID, scope, idpSessionID string) (*IssuedTokens, error) {
 	access := genID("at")
 	refresh := genID("rt")
 	now := nowMs()
 	if _, err := a.db.Exec(
-		`INSERT INTO oauth_tokens(token, kind, client_id, github_id, scope, expires_at) VALUES (?,?,?,?,?,?)`,
-		access, "access", clientID, githubID, nullStr(scope), now+accessTTLMs,
+		`INSERT INTO oauth_tokens(token, kind, client_id, github_id, scope, expires_at, idp_session_id) VALUES (?,?,?,?,?,?,?)`,
+		access, "access", clientID, githubID, nullStr(scope), now+accessTTLMs, idpSessionID,
 	); err != nil {
 		return nil, err
 	}
 	if _, err := a.db.Exec(
-		`INSERT INTO oauth_tokens(token, kind, client_id, github_id, scope, expires_at) VALUES (?,?,?,?,?,?)`,
-		refresh, "refresh", clientID, githubID, nullStr(scope), now+refreshTTLMs,
+		`INSERT INTO oauth_tokens(token, kind, client_id, github_id, scope, expires_at, idp_session_id) VALUES (?,?,?,?,?,?,?)`,
+		refresh, "refresh", clientID, githubID, nullStr(scope), now+refreshTTLMs, idpSessionID,
 	); err != nil {
 		return nil, err
 	}
@@ -343,32 +372,34 @@ func (a *App) mintTokens(clientID, githubID, scope string) (*IssuedTokens, error
 }
 
 type accessInfo struct {
-	GitHubID string
-	ClientID string
-	Scope    string
+	GitHubID     string
+	ClientID     string
+	Scope        string
+	IdpSessionID string
 }
 
 func (a *App) resolveAccessToken(token string) (*accessInfo, error) {
 	var (
 		info    accessInfo
 		scope   sql.NullString
+		idp     sql.NullString
 		expires int64
 		revoked sql.NullInt64
 	)
 	err := a.db.QueryRow(
-		`SELECT github_id, client_id, scope, expires_at, revoked_at
+		`SELECT github_id, client_id, scope, expires_at, revoked_at, idp_session_id
 		 FROM oauth_tokens WHERE token = ? AND kind = 'access'`, token,
-	).Scan(&info.GitHubID, &info.ClientID, &scope, &expires, &revoked)
+	).Scan(&info.GitHubID, &info.ClientID, &scope, &expires, &revoked, &idp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if revoked.Valid || expires < nowMs() {
+	if revoked.Valid || expires < nowMs() || !idp.Valid || idp.String == "" {
 		return nil, nil
 	}
-	info.Scope = scope.String
+	info.Scope, info.IdpSessionID = scope.String, idp.String
 	return &info, nil
 }
 
