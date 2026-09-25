@@ -47,6 +47,9 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
+          # arm64 for the CDU node (Hetzner CAX), amd64 for the others. Go
+          # cross-compiles in the Dockerfile, so no QEMU is needed.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest

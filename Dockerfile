@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # --- Stage 1: build the Tailwind + DaisyUI stylesheet (self-hosted, no CDN) ---
-FROM node:26-bookworm-slim AS css
+# The CSS is architecture-independent: always build it natively on the build
+# platform, never under emulation.
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS css
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
