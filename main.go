@@ -15,6 +15,7 @@ import (
 
 func main() {
 	cfg := loadConfig()
+	warnDeprecated()
 	ui.Theme = cfg.Theme
 
 	db, err := openDB(cfg.DatabasePath)
@@ -24,9 +25,11 @@ func main() {
 	defer db.Close()
 
 	app := newApp(cfg, db)
-	// Data minimisation: purge surveys past their delete_at at start and hourly.
+	// Data minimisation: purge surveys past their delete_at at start and hourly;
+	// drop expired sessions/tokens and unreferenced provider sessions with them.
 	go func() {
 		for {
+			app.purgeAuth()
 			if n, err := app.purgeDueForms(); err != nil {
 				logJSON("error", "purge failed", map[string]any{"err": err.Error()})
 			} else if n > 0 {

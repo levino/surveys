@@ -19,10 +19,20 @@ CSS. See `README.md` for the user-facing overview and configuration.
   ignored). Discovery lives in `mountOauth`: keep the two flags Claude keys on
   (`client_id_metadata_document_supported`, `"none"` auth method), the
   path-suffixed PRM and the `WWW-Authenticate` challenge in `mcp.go` intact.
-- **Teams** come either from the `groups` claim cached at login (`user_teams`)
-  or, when `ZITADEL_*` is configured, from a live grants lookup on every
-  request (`zitadel.go`, wired in `contextForUser`). Prefer the lookup; it is
-  what keeps a revoked membership from surviving inside a long-lived MCP token.
+- **Teams** come from the user's own OIDC tokens — never from a service
+  credential. With `ZITADEL_TEAM_PROJECTS` from the project role claims
+  `urn:zitadel:iam:org:project:<id>:roles` (`zitadel.go`), otherwise from the
+  `groups` claim; userinfo is the fallback when the ID token is silent.
+  Login (`oidc.go`) uses PKCE S256 + nonce and verifies every ID token via
+  JWKS (`jwt.go`). Each login is an `idp_sessions` row holding the provider
+  refresh token, `sid` and derived teams; browser sessions, auth codes and MCP
+  tokens carry its `idp_session_id`. `freshIdpSession` (`auth.go`) refreshes
+  when older than `OIDC_REFRESH_INTERVAL` (serialised per session — refresh
+  tokens rotate); a rejected refresh or a back-channel logout
+  (`POST /login/backchannel-logout`, `web_auth.go`) runs `endIdpSessions`,
+  which deletes the browser sessions and MCP tokens with it. Provider down =
+  deny (503) but keep the session. Never let a token without
+  `idp_session_id` through.
 - **Authorization** (`auth.go` `canManage`): team members read; the creator
   or a team maintainer (`IsMaintainer`, from `OIDC_MAINTAINER_SUFFIX`) writes.
   Mutating tools go through `requireManagedForm`; never add a global admin.
@@ -32,13 +42,14 @@ CSS. See `README.md` for the user-facing overview and configuration.
 - **Persistence** (`db.go`): SQLite (modernc, CGO-free), single writer.
   Schema changes: add the column to `schema` AND an idempotent `ALTER TABLE`
   in `migrate()` (existing databases), then extend `formCols`/`scanForm`.
+  Indexes on ALTERed columns belong in `migrate()`, not in `schema`.
 - **Markdown** (`md.go`): goldmark renders description + field `help`; raw HTML
   is escaped (not unsafe).
 
 ## Build / test
 
 ```bash
-go test ./...                 # in-process OIDC mock; no network
+go test ./...                 # in-process signing OIDC mock (oidcmock_test.go); no network
 go run .                      # needs assets/app.css (npm run build:css once)
 templ generate                # regenerate ui/*_templ.go after editing *.templ
 npm ci && npm run build:css   # rebuild Tailwind/DaisyUI CSS

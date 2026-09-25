@@ -17,55 +17,7 @@ import (
 	"time"
 )
 
-type mockUser struct {
-	sub    string
-	name   string
-	groups []string
-}
-
-func mkIDToken(sub, name string, groups []string, iss string) string {
-	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload, _ := json.Marshal(map[string]any{
-		"sub": sub, "name": name, "groups": groups, "iss": iss,
-		"exp": time.Now().Add(time.Hour).Unix(),
-	})
-	body := base64.RawURLEncoding.EncodeToString(payload)
-	return hdr + "." + body + "."
-}
-
-func newOIDCMock(t *testing.T, users ...mockUser) *httptest.Server {
-	byCode := map[string]mockUser{}
-	for _, u := range users {
-		byCode["code-"+u.sub] = u
-	}
-	var issuer string
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{
-			"issuer":                 issuer,
-			"authorization_endpoint": issuer + "/auth",
-			"token_endpoint":         issuer + "/token",
-		})
-	})
-	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		u, ok := byCode[r.PostForm.Get("code")]
-		if !ok {
-			writeJSON(w, 400, map[string]string{"error": "invalid_grant"})
-			return
-		}
-		writeJSON(w, 200, map[string]any{
-			"access_token": "at", "token_type": "bearer",
-			"id_token": mkIDToken(u.sub, u.name, u.groups, issuer),
-		})
-	})
-	srv := httptest.NewServer(mux)
-	issuer = srv.URL
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func newTestApp(t *testing.T, oidc *httptest.Server) *App {
+func newTestApp(t *testing.T, oidc *oidcMock) *App {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := openDB(dbPath)
@@ -77,11 +29,12 @@ func newTestApp(t *testing.T, oidc *httptest.Server) *App {
 		BaseURL:          "http://localhost:8080",
 		AppName:          "Test",
 		OIDCIssuer:       oidc.URL,
-		OIDCClientID:     "surveys",
+		OIDCClientID:     mockClientID,
 		OIDCClientSecret: "secret",
 		GroupPrefix:      "acme:",
 		MaintainerSuffix: ":admin",
-		Scopes:           "openid profile email groups",
+		Scopes:           "openid profile email offline_access groups",
+		RefreshInterval:  10 * time.Minute,
 		SessionSecret:    "test-secret",
 	}
 	app := newApp(cfg, db)
@@ -127,7 +80,7 @@ func newCIMDDoc(t *testing.T, name string) *cimdDoc {
 	return d
 }
 
-func newTestAppRetention(t *testing.T, oidc *httptest.Server, days int) *App {
+func newTestAppRetention(t *testing.T, oidc *oidcMock, days int) *App {
 	app := newTestApp(t, oidc)
 	app.cfg.RetentionDays = days
 	return app
@@ -166,7 +119,7 @@ func TestOIDCLoginStoresTeams(t *testing.T) {
 	oidc := newOIDCMock(t, mockUser{sub: "alice", name: "Alice", groups: []string{"acme:marketing"}})
 	app := newTestApp(t, oidc)
 
-	user, sid, err := app.loginViaOIDC("code-alice", "test-agent")
+	user, sid, err := oidc.login(t, app, "alice")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -306,7 +259,7 @@ func TestMcpOAuthAndCreateForm(t *testing.T) {
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
 
-	_, sid, err := app.loginViaOIDC("code-alice", "agent")
+	_, sid, err := oidc.login(t, app, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +308,7 @@ func TestPublicSubmissionAndVisibility(t *testing.T) {
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
 
-	_, aliceSid, _ := app.loginViaOIDC("code-alice", "agent")
+	_, aliceSid, _ := oidc.login(t, app, "alice")
 	aliceTok := fullOAuthToken(t, ts, aliceSid)
 	create := mcpCall(t, ts, aliceTok, "tools/call", map[string]any{
 		"name": "create_form",
@@ -406,7 +359,7 @@ func TestPublicSubmissionAndVisibility(t *testing.T) {
 		t.Fatalf("expected 1 submission, got %v", subData["count"])
 	}
 
-	_, bobSid, _ := app.loginViaOIDC("code-bob", "agent")
+	_, bobSid, _ := oidc.login(t, app, "bob")
 	bobTok := fullOAuthToken(t, ts, bobSid)
 	bobView := mcpCall(t, ts, bobTok, "tools/call", map[string]any{
 		"name": "list_submissions", "arguments": map[string]any{"form_id": formID},
@@ -430,7 +383,7 @@ func TestFormRendersMarkdownHelpAndInlineErrors(t *testing.T) {
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
 
-	_, sid, _ := app.loginViaOIDC("code-alice", "agent")
+	_, sid, _ := oidc.login(t, app, "alice")
 	tok := fullOAuthToken(t, ts, sid)
 	create := mcpCall(t, ts, tok, "tools/call", map[string]any{
 		"name": "create_form",
@@ -483,7 +436,7 @@ func TestSubmissionsWebPage(t *testing.T) {
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
 
-	_, aliceSid, _ := app.loginViaOIDC("code-alice", "agent")
+	_, aliceSid, _ := oidc.login(t, app, "alice")
 	aliceTok := fullOAuthToken(t, ts, aliceSid)
 	create := mcpCall(t, ts, aliceTok, "tools/call", map[string]any{
 		"name": "create_form",
@@ -533,7 +486,7 @@ func TestSubmissionsWebPage(t *testing.T) {
 		t.Fatalf("csv export failed: status %d", cres.StatusCode)
 	}
 
-	_, bobSid, _ := app.loginViaOIDC("code-bob", "agent")
+	_, bobSid, _ := oidc.login(t, app, "bob")
 	nonMember, _ := http.NewRequest("GET", ts.URL+"/surveys/"+ref, nil)
 	nonMember.AddCookie(&http.Cookie{Name: sessionCookie, Value: bobSid})
 	nres, _ := http.DefaultClient.Do(nonMember)
@@ -598,7 +551,7 @@ func TestCreatorAdminAndTeamRead(t *testing.T) {
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
 	tok := func(sub string) string {
-		_, sid, err := app.loginViaOIDC("code-"+sub, "agent")
+		_, sid, err := oidc.login(t, app, sub)
 		if err != nil {
 			t.Fatalf("login %s: %v", sub, err)
 		}
@@ -668,7 +621,7 @@ func TestRetentionAndPurge(t *testing.T) {
 	app := newTestAppRetention(t, oidc, 30)
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
-	_, sid, _ := app.loginViaOIDC("code-alice", "agent")
+	_, sid, _ := oidc.login(t, app, "alice")
 	tok := fullOAuthToken(t, ts, sid)
 	fields := []map[string]any{{"key": "name", "label": "Name", "type": "text"}}
 
@@ -710,99 +663,6 @@ func TestRetentionAndPurge(t *testing.T) {
 	}
 }
 
-// Runtime grants: teams come from ZITADEL on every call, not from the login.
-// A revoked grant disappears at once; an unreachable ZITADEL means no access.
-func TestZitadelRuntimeGrants(t *testing.T) {
-	oidc := newOIDCMock(t, mockUser{sub: "alice", name: "Alice"}, mockUser{sub: "bob", name: "Bob"})
-	var (
-		mu     sync.Mutex
-		grants = map[string][]map[string]any{ // projectId -> rows
-			"p-a": {{"userId": "alice", "roleKeys": []string{"mitglied", "admin"}, "state": "USER_GRANT_STATE_ACTIVE"},
-				{"userId": "bob", "roleKeys": []string{"mitglied"}, "state": "USER_GRANT_STATE_ACTIVE"}},
-			"p-b": {{"userId": "bob", "roleKeys": []string{"mitglied"}, "state": "USER_GRANT_STATE_ACTIVE"}},
-		}
-		down bool
-	)
-	zmux := http.NewServeMux()
-	zmux.HandleFunc("POST /management/v1/users/grants/_search", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		if down {
-			w.WriteHeader(503)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer svc-token" || r.Header.Get("x-zitadel-orgid") != "org1" {
-			w.WriteHeader(401)
-			return
-		}
-		var q struct {
-			Queries []struct {
-				P struct {
-					ProjectID string `json:"projectId"`
-				} `json:"projectIdQuery"`
-			} `json:"queries"`
-		}
-		json.NewDecoder(r.Body).Decode(&q)
-		writeJSON(w, 200, map[string]any{"result": grants[q.Queries[0].P.ProjectID]})
-	})
-	zsrv := httptest.NewServer(zmux)
-	defer zsrv.Close()
-
-	app := newTestApp(t, oidc)
-	app.cfg.OIDCIssuer = oidc.URL
-	app.cfg.ZitadelOrgID = "org1"
-	app.cfg.ZitadelServiceToken = "svc-token"
-	app.cfg.ZitadelTeamProjects = map[string]string{"p-a": "klasse-a", "p-b": "klasse-b"}
-	app.cfg.ZitadelMaintainerRole = "admin"
-	app.grants = newZitadelGrants(app.cfg, app.http)
-	app.grants.issuer = zsrv.URL // grants live at the issuer; the mock OIDC has no management API
-	ts := httptest.NewServer(app.routes())
-	defer ts.Close()
-
-	tok := func(sub string) string {
-		_, sid, err := app.loginViaOIDC("code-"+sub, "agent")
-		if err != nil {
-			t.Fatalf("login: %v", err)
-		}
-		return fullOAuthToken(t, ts, sid)
-	}
-	alice, bob := tok("alice"), tok("bob")
-	teams := toolResultText(t, mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
-	if !strings.Contains(teams, `"klasse-a"`) || !strings.Contains(teams, `"klasse-b"`) {
-		t.Fatalf("bob should be in both classes via grants, got %s", teams)
-	}
-	teams = toolResultText(t, mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
-	if !strings.Contains(teams, `"is_maintainer": true`) || strings.Contains(teams, `"klasse-b"`) {
-		t.Fatalf("alice: maintainer of klasse-a only, got %s", teams)
-	}
-
-	create := mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "create_form",
-		"arguments": map[string]any{"title": "Fest", "owner_team": "klasse-b",
-			"fields": []map[string]any{{"key": "n", "label": "N", "type": "text"}}}})
-	var created map[string]any
-	json.Unmarshal([]byte(toolResultText(t, create)), &created)
-	formID := created["id"].(string)
-
-	// revoke bob's klasse-b grant: gone at once, even though his token is unchanged
-	mu.Lock()
-	grants["p-b"] = nil
-	mu.Unlock()
-	app.grants.cache = map[string]grantsCache{}
-	res, _ := mcpCall(t, ts, bob, "tools/call", map[string]any{"name": "get_form", "arguments": map[string]any{"id": formID}})["result"].(map[string]any)
-	if res["isError"] != true {
-		t.Fatalf("revoked grant must lose access immediately")
-	}
-	// ZITADEL down: deny, do not wave through
-	mu.Lock()
-	down = true
-	mu.Unlock()
-	app.grants.cache = map[string]grantsCache{}
-	teams = toolResultText(t, mcpCall(t, ts, alice, "tools/call", map[string]any{"name": "list_teams", "arguments": map[string]any{}}))
-	if strings.Contains(teams, `"klasse-a"`) {
-		t.Fatalf("with ZITADEL down nobody may keep teams, got %s", teams)
-	}
-}
-
 // What Claude needs to pick CIMD on its own, and the RFC 9728 chain from 401.
 func TestDiscoveryForCIMDClients(t *testing.T) {
 	app := newTestApp(t, newOIDCMock(t))
@@ -840,7 +700,7 @@ func TestCIMDClientRules(t *testing.T) {
 	app := newTestApp(t, oidc)
 	ts := httptest.NewServer(app.routes())
 	defer ts.Close()
-	_, sid, _ := app.loginViaOIDC("code-alice", "agent")
+	_, sid, _ := oidc.login(t, app, "alice")
 
 	authorize := func(clientID, redirect, resource string) *http.Response {
 		au, _ := url.Parse(ts.URL + "/oauth/authorize")

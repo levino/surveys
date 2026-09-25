@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -52,7 +53,11 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := a.bearerContext(r); !ok {
+		if _, err := a.bearerContext(r); err != nil {
+			if errors.Is(err, errIdPUnavailable) {
+				http.Error(w, "identity provider unavailable", 503)
+				return
+			}
 			a.wwwAuthenticate(w)
 			http.Error(w, "missing or invalid token", 401)
 			return
@@ -63,8 +68,14 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		ctx, ok := a.bearerContext(r)
-		if !ok {
+		ctx, err := a.bearerContext(r)
+		if errors.Is(err, errIdPUnavailable) {
+			// Fail closed, but do not make the client throw its token away.
+			w.Header().Set("Retry-After", "30")
+			writeJSON(w, 503, jsonRPCError(nil, -32002, "identity provider unavailable, retry later"))
+			return
+		}
+		if err != nil {
 			a.wwwAuthenticate(w)
 			writeJSON(w, 401, jsonRPCError(nil, -32001, "missing or invalid token"))
 			return
@@ -129,18 +140,29 @@ func (a *App) dispatchRPC(req *jsonRPCRequest, ctx *AuthContext) (any, *rpcError
 	}
 }
 
-func (a *App) bearerContext(r *http.Request) (*AuthContext, bool) {
+// bearerContext resolves the MCP access token and runs the same freshness
+// check as a browser session: tokens older than the refresh interval are
+// refreshed at the provider (teams re-derived) before the call proceeds.
+// errIdPUnavailable = provider down (deny, keep token); any other error =
+// unauthenticated.
+func (a *App) bearerContext(r *http.Request) (*AuthContext, error) {
 	m := bearerRe.FindStringSubmatch(r.Header.Get("Authorization"))
 	if m == nil {
-		return nil, false
+		return nil, errSessionEnded
 	}
 	info, err := a.resolveAccessToken(m[1])
-	if err != nil || info == nil {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
-	ctx, err := a.contextForUser(info.GitHubID)
-	if err != nil || ctx == nil {
-		return nil, false
+	if info == nil {
+		return nil, errSessionEnded
 	}
-	return ctx, true
+	ctx, err := a.contextForIdpSession(info.IdpSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if ctx.User.GitHubID != info.GitHubID {
+		return nil, errSessionEnded
+	}
+	return ctx, nil
 }

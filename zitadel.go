@@ -1,142 +1,105 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 )
 
-// Team membership looked up at ZITADEL at request time, instead of trusting
-// whatever the ID token said at login.
+// Team membership from the user's own ZITADEL tokens.
 //
-// Why: an MCP token lives for a long time and refreshes itself; anything baked
-// into it at login is stale by construction. A person who left a class would
-// keep reading that class's surveys until the token finally dies, and a newly
-// granted role would not arrive at all. ZITADEL runs next door, the lookup
-// costs milliseconds, and a survey tool sees a handful of calls per hour — so
-// ask every time (memoised for a few seconds), and DENY when ZITADEL does not
-// answer. This mirrors the class sites' `svc-grants-reader` pattern.
+// The app holds no ZITADEL credential of its own and has no org-wide read
+// access. At login it asks for the reserved scopes
+//
+//	urn:zitadel:iam:org:projects:roles              -> assert roles of every project in the audience
+//	urn:zitadel:iam:org:project:id:<projectId>:aud  -> put each team project into the audience
+//
+// and ZITADEL answers with one claim per project:
+//
+//	"urn:zitadel:iam:org:project:<projectId>:roles": {"<roleKey>": {"<orgId>": "<orgDomain>"}, …}
+//
+// (https://zitadel.com/docs/apis/openidoauth/scopes, …/claims). Any role in a
+// configured project makes the user a member of that project's team; the
+// configured maintainer role makes them a maintainer. The tokens are
+// refreshed every OIDC_REFRESH_INTERVAL (default 10 min), so a revoked grant
+// is gone within that window — or at once via back-channel logout.
 //
 // One configured project per team: ZITADEL_TEAM_PROJECTS="<projectId>=<slug>,…".
-// The grants are fetched per project (projectIdQuery) and filtered by user in
-// memory — a userIdQuery was measured to return nothing on the instance this
-// was written for, so it is deliberately not used.
 
-type zitadelGrants struct {
-	issuer   string
-	orgID    string
-	token    string
-	projects map[string]string // projectId -> team slug
-	roleKey  string            // role that makes a member a maintainer
-	http     *http.Client
+const (
+	zitadelScopeProjectsRoles = "urn:zitadel:iam:org:projects:roles"
+	zitadelRolesClaimPrefix   = "urn:zitadel:iam:org:project:"
+)
 
-	mu    sync.Mutex
-	cache map[string]grantsCache // projectId -> rows
+func zitadelAudScope(projectID string) string {
+	return "urn:zitadel:iam:org:project:id:" + projectID + ":aud"
 }
 
-type grantsCache struct {
-	at   time.Time
-	rows []grantRow
+func zitadelRolesClaim(projectID string) string {
+	return zitadelRolesClaimPrefix + projectID + ":roles"
 }
 
-type grantRow struct {
-	UserID   string   `json:"userId"`
-	RoleKeys []string `json:"roleKeys"`
-	State    string   `json:"state"`
-}
-
-const grantsCacheTTL = 5 * time.Second
-
-func newZitadelGrants(cfg Config, client *http.Client) *zitadelGrants {
-	if cfg.ZitadelServiceToken == "" || len(cfg.ZitadelTeamProjects) == 0 {
-		return nil
-	}
-	return &zitadelGrants{
-		issuer:   strings.TrimRight(cfg.OIDCIssuer, "/"),
-		orgID:    cfg.ZitadelOrgID,
-		token:    cfg.ZitadelServiceToken,
-		projects: cfg.ZitadelTeamProjects,
-		roleKey:  cfg.ZitadelMaintainerRole,
-		http:     client,
-		cache:    map[string]grantsCache{},
-	}
-}
-
-// teamsFor returns the user's teams from live grants. An error means
-// "could not verify" and must be treated as "no access".
-func (z *zitadelGrants) teamsFor(userID string) ([]teamMembership, error) {
-	var out []teamMembership
-	ids := make([]string, 0, len(z.projects))
-	for id := range z.projects {
+// zitadelTeams reads the per-project role claims. asserted reports whether
+// ANY configured project claim was present — ZITADEL omits the claim for a
+// project without roles, so all-absent can also mean "not asserted in this
+// token" and is answered from userinfo.
+func zitadelTeams(claims map[string]json.RawMessage, projects map[string]string, maintainerRole string) ([]teamMembership, bool) {
+	ids := make([]string, 0, len(projects))
+	for id := range projects {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	var out []teamMembership
+	asserted := false
 	for _, pid := range ids {
-		rows, err := z.projectGrants(pid)
-		if err != nil {
-			return nil, err
+		raw, ok := claims[zitadelRolesClaim(pid)]
+		if !ok {
+			continue
 		}
-		for _, r := range rows {
-			if r.UserID != userID || (r.State != "" && r.State != "USER_GRANT_STATE_ACTIVE") {
-				continue
-			}
-			m := teamMembership{Slug: z.projects[pid]}
-			for _, k := range r.RoleKeys {
-				if k == z.roleKey {
-					m.IsMaintainer = true
-				}
-			}
-			out = append(out, m)
-			break
+		asserted = true
+		roles := roleKeys(raw)
+		if len(roles) == 0 {
+			continue
 		}
+		m := teamMembership{Slug: projects[pid]}
+		for _, r := range roles {
+			if r == maintainerRole {
+				m.IsMaintainer = true
+			}
+		}
+		out = append(out, m)
 	}
-	return out, nil
+	return out, asserted
 }
 
-func (z *zitadelGrants) projectGrants(projectID string) ([]grantRow, error) {
-	z.mu.Lock()
-	if c, ok := z.cache[projectID]; ok && time.Since(c.at) < grantsCacheTTL {
-		z.mu.Unlock()
-		return c.rows, nil
+// roleKeys accepts the object form ZITADEL emits ({"role": {orgId: domain}})
+// and, defensively, an array of such objects (as drawn in the docs example).
+func roleKeys(raw json.RawMessage) []string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) == nil {
+		out := make([]string, 0, len(obj))
+		for k := range obj {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
 	}
-	z.mu.Unlock()
-
-	body, _ := json.Marshal(map[string]any{
-		"query":   map[string]any{"limit": 1000},
-		"queries": []map[string]any{{"projectIdQuery": map[string]any{"projectId": projectID}}},
-	})
-	req, err := http.NewRequest("POST", z.issuer+"/management/v1/users/grants/_search", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	var arr []map[string]json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		seen := map[string]bool{}
+		var out []string
+		for _, o := range arr {
+			for k := range o {
+				if !seen[k] {
+					seen[k] = true
+					out = append(out, k)
+				}
+			}
+		}
+		sort.Strings(out)
+		return out
 	}
-	req.Header.Set("Authorization", "Bearer "+z.token)
-	req.Header.Set("x-zitadel-orgid", z.orgID)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := z.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("zitadel grants: %w", err)
-	}
-	defer res.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("zitadel grants: %d %s", res.StatusCode, strings.TrimSpace(string(raw[:min(len(raw), 200)])))
-	}
-	var parsed struct {
-		Result []grantRow `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("zitadel grants decode: %w", err)
-	}
-	z.mu.Lock()
-	z.cache[projectID] = grantsCache{at: time.Now(), rows: parsed.Result}
-	z.mu.Unlock()
-	return parsed.Result, nil
+	return nil
 }
 
 // parseTeamProjects parses "id=slug,id=slug".
