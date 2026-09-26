@@ -375,8 +375,14 @@ func TestHealth(t *testing.T) {
 	if code, _ := get(app); code != 503 {
 		t.Fatalf("the check result must be cached")
 	}
-	app.credCheck.at = time.Time{}
+	app.credCheck.at = time.Now().Add(-credentialFailureTTL - time.Second)
 	if code, _ := get(app); code != 200 {
-		t.Fatalf("after the cache expires the check runs again")
+		t.Fatalf("a failure is re-checked after credentialFailureTTL")
 	}
+	oidc.set(func() { oidc.down = true })
+	app.credCheck.at = time.Now().Add(-credentialFailureTTL - time.Second)
+	if code, _ := get(app); code != 200 {
+		t.Fatalf("a success stays valid for credentialCheckTTL")
+	}
+	oidc.set(func() { oidc.down = false })
 }

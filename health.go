@@ -17,6 +17,10 @@ import (
 
 const credentialCheckTTL = 5 * time.Minute
 
+// A failure is re-checked soon, so one provider hiccup does not keep the
+// smoke check red for five minutes.
+const credentialFailureTTL = 30 * time.Second
+
 type credentialCheck struct {
 	Status    string  `json:"status"` // ok | failing | not_configured
 	CheckedAt *string `json:"checkedAt"`
@@ -46,7 +50,11 @@ func (a *App) checkCredentials() credentialCheck {
 	c := &a.credCheck
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.at.IsZero() && time.Since(c.at) < credentialCheckTTL {
+	ttl := credentialCheckTTL
+	if c.result.Status == "failing" {
+		ttl = credentialFailureTTL
+	}
+	if !c.at.IsZero() && time.Since(c.at) < ttl {
 		return c.result
 	}
 	c.result, c.at = a.probeCredentials(), time.Now()
@@ -71,7 +79,9 @@ func (a *App) probeCredentials() credentialCheck {
 	if p.RevokeURL == "" {
 		return credentialCheck{Status: "not_configured", CheckedAt: &now}
 	}
-	res, err := a.postToIdP(p.RevokeURL, url.Values{"token": {"probe-" + randomToken()}, "token_type_hint": {"refresh_token"}})
+	// Not valid base64: ZITADEL decrypts random base64 into garbage and then
+	// answers 500 for about 5% of probes (measured against production).
+	res, err := a.postToIdP(p.RevokeURL, url.Values{"token": {"health-probe." + randomToken()}, "token_type_hint": {"refresh_token"}})
 	if err != nil {
 		return fail(err.Error())
 	}
