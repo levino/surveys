@@ -27,10 +27,17 @@ CSS. See `README.md` for the user-facing overview and configuration.
   JWKS (`jwt.go`). Each login is an `idp_sessions` row holding the provider
   refresh token, `sid` and derived teams; browser sessions, auth codes and MCP
   tokens carry its `idp_session_id`. `freshIdpSession` (`auth.go`) refreshes
-  when older than `OIDC_REFRESH_INTERVAL` (serialised per session — refresh
-  tokens rotate); a rejected refresh or a back-channel logout
-  (`POST /login/backchannel-logout`, `web_auth.go`) runs `endIdpSessions`,
-  which deletes the browser sessions and MCP tokens with it. Provider down =
+  once `access_expires_at` (from `expires_in`, capped by
+  `OIDC_REFRESH_INTERVAL`) is reached (serialised per session — refresh
+  tokens rotate); a rejected refresh, a back-channel logout
+  (`POST /login/backchannel-logout`, `web_auth.go`), a logout or a signed
+  ZITADEL event (`POST /login/zitadel-events`, `zitadel_events.go`) runs
+  `endIdpSessions`, which deletes the browser sessions and MCP tokens with
+  it; `forceRefresh` (grant changes) only zeroes `access_expires_at`.
+  Client auth at token/revocation endpoints (`clientauth.go`):
+  `private_key_jwt` with `OIDC_CLIENT_KEY`, else Basic with the secret.
+  `GET /health` (`health.go`) proves that credential against the
+  revocation endpoint; `/healthz` stays liveness only. Provider down =
   deny (503) but keep the session. Never let a token without
   `idp_session_id` through.
 - **Authorization** (`auth.go` `canManage`): team members read; the creator

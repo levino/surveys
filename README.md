@@ -68,13 +68,15 @@ when the redirect goes to a local process.
 | `PUBLIC_THEME`        | `surveys`               | DaisyUI `data-theme` (see `tailwind.config.js`) |
 | `OIDC_ISSUER`         | –                       | OIDC provider issuer URL (required) |
 | `OIDC_CLIENT_ID`      | `surveys`               | OIDC client id |
-| `OIDC_CLIENT_SECRET`  | –                       | OIDC client secret (required) |
+| `OIDC_CLIENT_SECRET`  | –                       | OIDC client secret (`client_secret_basic`); required unless `OIDC_CLIENT_KEY` is set |
+| `OIDC_CLIENT_KEY`     | –                       | ZITADEL application key JSON (`type` `application`, `keyId`, `key`, `clientId`) for `private_key_jwt`. Wins over `OIDC_CLIENT_SECRET`; `OIDC_CLIENT_ID` may be omitted (taken from the key), a mismatch stops the start |
 | `OIDC_GROUP_PREFIX`   | `` (empty)              | Prefix stripped from `groups` to form the team slug |
 | `OIDC_MAINTAINER_SUFFIX` | `` (empty)           | A group ending in this suffix (e.g. `:admin`) makes the user a maintainer of the team named by the rest — maintainers may change/delete every survey of that team |
 | `OIDC_SCOPES`         | `openid profile email offline_access groups` | Scopes requested at login. With `ZITADEL_TEAM_PROJECTS` the ZITADEL role/audience scopes and `offline_access` are added automatically |
-| `OIDC_REFRESH_INTERVAL` | `10m`                 | Provider tokens older than this are refreshed on the next request (browser or MCP), and the teams re-derived. Go duration or seconds |
+| `OIDC_REFRESH_INTERVAL` | `10m`                 | Upper bound for using the provider's access token: it is refreshed on the next request (browser or MCP) once it expires (`expires_in`) or is older than this, and the teams are re-derived. Go duration or seconds |
 | `ZITADEL_TEAM_PROJECTS` | –                     | `"<projectId>=<team-slug>,…"` — one team per ZITADEL project (see below) |
 | `ZITADEL_MAINTAINER_ROLE` | `admin`             | Role key in a team project that makes the user a maintainer |
+| `ZITADEL_WEBHOOK_SIGNING_KEY` | –               | Signing key of the ZITADEL Actions v2 target calling `POST /login/zitadel-events`; unset = the route answers 404 |
 | `DEFAULT_RETENTION_DAYS` | `0`                  | New surveys get `delete_at = now + N days` unless set explicitly. `0` = keep until deleted by hand |
 | `SESSION_SECRET`      | –                       | Salt for IP hashing (GDPR) |
 
@@ -99,15 +101,18 @@ npm ci && npm run build:css
 Register a confidential web client (code flow, PKCE is always sent) at your
 provider:
 - Redirect URI: `https://<host>/login/callback`
+- Post-logout redirect URI: `https://<host>/`
 - Back-channel logout URI: `https://<host>/login/backchannel-logout`
+- Client authentication: `private_key_jwt` (`OIDC_CLIENT_KEY`) or client
+  secret (`OIDC_CLIENT_SECRET`)
 - Grant types: authorization code **and refresh token**
 - Scopes: `openid profile email offline_access groups` (plain OIDC) — for
   ZITADEL see below
 
 How sessions stay current: every login keeps the provider's **refresh token**
 server-side (never in the browser or the MCP client). When the tokens of a
-session are older than `OIDC_REFRESH_INTERVAL` (default 10 minutes), the next
-request — browser or MCP — refreshes them and re-derives the teams from the
+session have expired (`expires_in`, at most `OIDC_REFRESH_INTERVAL`,
+default 10 minutes), the next request — browser or MCP — refreshes them and re-derives the teams from the
 new tokens. MCP tokens are bound to the login they were authorized from, so
 they follow the same rule, including on their own refresh grant.
 
@@ -123,6 +128,11 @@ they follow the same rule, including on their own refresh grant.
   `backchannel-logout` event, `sid` and/or `sub`, no `nonce`) and at once
   deletes the matching sessions and MCP tokens — by `sid` (stored at login)
   or, without `sid`, every session of `sub`.
+
+- **Logout** (`/logout`) deletes the browser session and the login behind it
+  (with its MCP tokens), revokes the refresh token at the provider's
+  `revocation_endpoint` and continues at its `end_session_endpoint`
+  (`client_id`, `post_logout_redirect_uri=<base>/`).
 
 Every ID token is verified against the provider's JWKS (`iss`, `aud`/`azp`,
 `exp`, `iat`, and the login `nonce`).
@@ -153,11 +163,27 @@ does not carry them (the app's *User roles inside ID Token* is off), the
 service reads them from the userinfo endpoint with the user's access token.
 The `groups` claim is ignored in this mode.
 
-ZITADEL app settings: *Web*, auth method *Basic*, grant types *Authorization
+ZITADEL app settings: *Web*, auth method *Private Key JWT* (application key
+as `OIDC_CLIENT_KEY`; *Basic* with `OIDC_CLIENT_SECRET` still works), grant types *Authorization
 Code* + *Refresh Token*, redirect `…/login/callback`, back-channel logout URI
 `…/login/backchannel-logout` (back-channel logout must be enabled on the
 instance). *User roles inside ID Token* is recommended (saves a userinfo
 call); *User Info inside ID Token* is not needed.
+
+**Events (Actions v2).** Locks, removed grants and ended sessions do not all
+produce a back-channel logout. Create a REST-webhook target (non-interrupting)
+for `https://<host>/login/zitadel-events`, put its signing key into
+`ZITADEL_WEBHOOK_SIGNING_KEY`, and add event executions for it. Every call is
+checked against the `ZITADEL-Signature` header (HMAC-SHA256, 5 minutes
+tolerance). Effect:
+
+| Event | Effect |
+|---|---|
+| `user.locked`, `user.deactivated`, `user.removed`, `user.token.removed`, `user.human.signed.out`, `user.human.refresh.token.removed` | every session and MCP token of the user ends |
+| `session.terminated` | only the login with this `sid` ends (other devices stay) |
+| `user.grant.removed`, `user.grant.cascade.removed`, `user.grant.deactivated` (team projects only) | the user's sessions end; without `userId` in the payload every session refreshes |
+| `user.grant.changed`, `user.grant.cascade.changed`, `user.grant.added`, `user.grant.reactivated` (team projects only) | the user's sessions refresh on their next request (teams re-read) |
+| `oidc_session.access_token.revoked`, `oidc_session.refresh_token.revoked` | every session refreshes (the revoked one fails and ends) |
 
 `ZITADEL_SERVICE_TOKEN` and `ZITADEL_ORG_ID` (the former grants lookup) are
 accepted but ignored with a deprecation warning at start — remove them and the
@@ -172,6 +198,23 @@ flattens the user's grants into `groups`, e.g. `["klasse-wiesen",
 "klasse-wiesen:admin"]`, and run with `OIDC_SCOPES="openid profile email offline_access"`,
 `OIDC_GROUP_PREFIX=""`, `OIDC_MAINTAINER_SUFFIX=":admin"`. The client needs
 *ID token userinfo assertion* enabled so the claim lands in the ID token.
+
+## Health
+
+- `GET /healthz` — liveness only (database ping); use it for probes.
+- `GET /health` — whether logins can work, `503` when not:
+
+```json
+{"status":"ok","auth":{"clientAuthentication":"private_key_jwt",
+ "credentialCheck":{"status":"ok","checkedAt":"2026-09-26T12:00:00Z","error":null}},
+ "webhook":"configured","backchannelLogout":"/login/backchannel-logout"}
+```
+
+`credentialCheck` proves the client credential at most every 5 minutes by
+revoking a random dummy token at the provider's `revocation_endpoint` (client
+authentication required, unknown tokens answer `200`). `degraded` (`503`) when
+no client credential is configured, the check fails, or `ZITADEL_TEAM_PROJECTS`
+is set without `ZITADEL_WEBHOOK_SIGNING_KEY`.
 
 ## MCP in Claude
 

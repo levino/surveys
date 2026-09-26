@@ -137,6 +137,27 @@ type idpSession struct {
 	RefreshToken string
 	Teams        []teamMembership
 	RefreshedAt  int64
+	// When the provider's access token expires (ms); the next use after it
+	// (minus refreshLeeway) refreshes.
+	AccessExpiresAt int64
+}
+
+const refreshLeeway = 15 * time.Second
+
+// accessExpiry: expires_in, capped by RefreshInterval so providers with
+// long-lived access tokens still get their teams re-read regularly.
+func (a *App) accessExpiry(expiresIn int64, now int64) int64 {
+	lifetime := a.cfg.RefreshInterval
+	if expiresIn > 0 {
+		if d := time.Duration(expiresIn) * time.Second; d < lifetime {
+			lifetime = d
+		}
+	}
+	return now + lifetime.Milliseconds()
+}
+
+func (s *idpSession) refreshDue(now int64) bool {
+	return now >= s.AccessExpiresAt-refreshLeeway.Milliseconds()
 }
 
 func (a *App) createIdpSession(id *identity) (string, error) {
@@ -144,8 +165,8 @@ func (a *App) createIdpSession(id *identity) (string, error) {
 	teams, _ := json.Marshal(nonNilTeams(id.Teams))
 	now := nowMs()
 	_, err := a.db.Exec(
-		`INSERT INTO idp_sessions(id, github_id, sid, refresh_token, teams, refreshed_at, created_at) VALUES (?,?,?,?,?,?,?)`,
-		sessID, id.Subject, nullStr(id.SID), nullStr(id.RefreshToken), string(teams), now, now,
+		`INSERT INTO idp_sessions(id, github_id, sid, refresh_token, teams, refreshed_at, created_at, access_expires_at) VALUES (?,?,?,?,?,?,?,?)`,
+		sessID, id.Subject, nullStr(id.SID), nullStr(id.RefreshToken), string(teams), now, now, a.accessExpiry(id.ExpiresIn, now),
 	)
 	return sessID, err
 }
@@ -164,8 +185,8 @@ func (a *App) loadIdpSession(id string) (*idpSession, error) {
 		teamsJSON string
 	)
 	err := a.db.QueryRow(
-		`SELECT id, github_id, sid, refresh_token, teams, refreshed_at FROM idp_sessions WHERE id = ?`, id,
-	).Scan(&s.ID, &s.Subject, &sid, &rt, &teamsJSON, &s.RefreshedAt)
+		`SELECT id, github_id, sid, refresh_token, teams, refreshed_at, access_expires_at FROM idp_sessions WHERE id = ?`, id,
+	).Scan(&s.ID, &s.Subject, &sid, &rt, &teamsJSON, &s.RefreshedAt, &s.AccessExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -189,7 +210,7 @@ func (a *App) refreshLock(id string) *sync.Mutex {
 }
 
 // freshIdpSession returns the provider session, refreshing its tokens (and
-// thereby its teams) first when they are older than cfg.RefreshInterval.
+// thereby its teams) first when the access token has expired.
 // Refreshes of one session are serialised: the provider rotates refresh
 // tokens, and two parallel refreshes with the same token would kill it.
 func (a *App) freshIdpSession(id string) (*idpSession, error) {
@@ -203,7 +224,7 @@ func (a *App) freshIdpSession(id string) (*idpSession, error) {
 	if s == nil {
 		return nil, errSessionEnded
 	}
-	if time.Duration(nowMs()-s.RefreshedAt)*time.Millisecond < a.cfg.RefreshInterval {
+	if !s.refreshDue(nowMs()) {
 		return s, nil
 	}
 
@@ -217,7 +238,7 @@ func (a *App) freshIdpSession(id string) (*idpSession, error) {
 	if s == nil {
 		return nil, errSessionEnded
 	}
-	if time.Duration(nowMs()-s.RefreshedAt)*time.Millisecond < a.cfg.RefreshInterval {
+	if !s.refreshDue(nowMs()) {
 		return s, nil
 	}
 	if s.RefreshToken == "" {
@@ -239,17 +260,31 @@ func (a *App) freshIdpSession(id string) (*idpSession, error) {
 		sid = ident.SID
 	}
 	now := nowMs()
+	expires := a.accessExpiry(ident.ExpiresIn, now)
 	if _, err := a.db.Exec(
-		`UPDATE idp_sessions SET refresh_token = ?, sid = ?, teams = ?, refreshed_at = ? WHERE id = ?`,
-		ident.RefreshToken, nullStr(sid), string(teams), now, id,
+		`UPDATE idp_sessions SET refresh_token = ?, sid = ?, teams = ?, refreshed_at = ?, access_expires_at = ? WHERE id = ?`,
+		ident.RefreshToken, nullStr(sid), string(teams), now, expires, id,
 	); err != nil {
 		return nil, err
 	}
 	if ident.Name != "" {
 		_, _ = a.upsertUser(s.Subject, ident.Name, ident.Name)
 	}
-	s.RefreshToken, s.SID, s.Teams, s.RefreshedAt = ident.RefreshToken, sid, ident.Teams, now
+	s.RefreshToken, s.SID, s.Teams, s.RefreshedAt, s.AccessExpiresAt = ident.RefreshToken, sid, ident.Teams, now, expires
 	return s, nil
+}
+
+// forceRefresh makes the matching provider sessions refresh on their next
+// use, which re-reads the teams (or ends the session if the provider says
+// no). where is a condition on idp_sessions with its args.
+func (a *App) forceRefresh(where string, args ...any) int {
+	res, err := a.db.Exec(`UPDATE idp_sessions SET access_expires_at = 0 WHERE `+where, args...)
+	if err != nil {
+		logJSON("error", "force refresh failed", map[string]any{"err": err.Error()})
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
 }
 
 // endIdpSessions deletes the matching provider sessions together with every

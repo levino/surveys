@@ -1,9 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -97,10 +100,10 @@ func (a *App) mountWebAuth(mux *http.ServeMux) {
 
 	logout := func(w http.ResponseWriter, r *http.Request) {
 		if sid := cookieValue(r, sessionCookie); sid != "" {
-			a.destroySession(sid)
+			a.logoutSession(sid)
 		}
 		a.deleteCookie(w, sessionCookie)
-		http.Redirect(w, r, "/login?logged_out=1", http.StatusFound)
+		http.Redirect(w, r, a.postLogoutTarget(), http.StatusFound)
 	}
 	mux.HandleFunc("POST /logout", logout)
 	mux.HandleFunc("GET /logout", logout)
@@ -109,6 +112,65 @@ func (a *App) mountWebAuth(mux *http.ServeMux) {
 	// user's session there ends (logout, block, admin kill). Register
 	// <base>/login/backchannel-logout as the client's back-channel logout URI.
 	mux.HandleFunc("POST /login/backchannel-logout", a.handleBackchannelLogout)
+
+	// ZITADEL Actions v2 target (zitadel_events.go); 404 without ZITADEL_WEBHOOK_SIGNING_KEY.
+	mux.HandleFunc("POST /login/zitadel-events", a.handleZitadelWebhook)
+}
+
+// logoutSession ends the browser session together with the provider login
+// behind it (and the MCP tokens bound to that login) and revokes its
+// refresh token at the provider.
+func (a *App) logoutSession(sid string) {
+	var idp sql.NullString
+	_ = a.db.QueryRow(`SELECT idp_session_id FROM sessions WHERE id = ?`, sid).Scan(&idp)
+	a.destroySession(sid)
+	if !idp.Valid || idp.String == "" {
+		return
+	}
+	s, _ := a.loadIdpSession(idp.String)
+	a.endIdpSessions("logout", `id = ?`, idp.String)
+	if s != nil && s.RefreshToken != "" {
+		if err := a.revokeAtIdP(s.RefreshToken); err != nil {
+			logJSON("warn", "refresh token not revoked at provider", map[string]any{"err": err.Error()})
+		}
+	}
+}
+
+func (a *App) revokeAtIdP(refreshToken string) error {
+	p, err := a.ensureOIDC()
+	if err != nil {
+		return err
+	}
+	if p.RevokeURL == "" {
+		return nil
+	}
+	res, err := a.postToIdP(p.RevokeURL, url.Values{"token": {refreshToken}, "token_type_hint": {"refresh_token"}})
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		raw, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return fmt.Errorf("revocation endpoint: %d %s", res.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// postLogoutTarget ends the login at the provider too, when it offers RP-initiated logout.
+func (a *App) postLogoutTarget() string {
+	p, err := a.ensureOIDC()
+	if err != nil || p.EndSession == "" {
+		return "/login?logged_out=1"
+	}
+	u, err := url.Parse(p.EndSession)
+	if err != nil {
+		return "/login?logged_out=1"
+	}
+	q := u.Query()
+	q.Set("client_id", a.cfg.OIDCClientID)
+	q.Set("post_logout_redirect_uri", strings.TrimRight(a.cfg.BaseURL, "/")+"/")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 const backchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logout"

@@ -32,6 +32,8 @@ type oidcProvider struct {
 	Issuer      string `json:"issuer"`
 	JWKSURL     string `json:"jwks_uri"`
 	UserinfoURL string `json:"userinfo_endpoint"`
+	RevokeURL   string `json:"revocation_endpoint"`
+	EndSession  string `json:"end_session_endpoint"`
 
 	jwks *jwksCache
 }
@@ -118,7 +120,9 @@ type identity struct {
 	Name         string
 	SID          string // provider session id (for back-channel logout)
 	RefreshToken string
-	Teams        []teamMembership
+	// Seconds the access token lives (expires_in); 0 = not sent.
+	ExpiresIn int64
+	Teams     []teamMembership
 }
 
 // idpRejected: the provider answered and said no (invalid_grant & co.). The
@@ -143,6 +147,7 @@ type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	IDToken      string `json:"id_token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
 	Error        string `json:"error"`
 	ErrDesc      string `json:"error_description"`
 }
@@ -152,14 +157,7 @@ func (a *App) tokenRequest(form url.Values) (*tokenResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", p.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.SetBasicAuth(url.QueryEscape(a.cfg.OIDCClientID), url.QueryEscape(a.cfg.OIDCClientSecret))
-	res, err := a.http.Do(req)
+	res, err := a.postToIdP(p.TokenURL, form)
 	if err != nil {
 		return nil, fmt.Errorf("oidc token endpoint: %w", err)
 	}
@@ -274,6 +272,7 @@ func (a *App) identityFrom(c jwtClaims, tok *tokenResponse) (*identity, error) {
 		Name:         c.str("name"),
 		SID:          c.str("sid"),
 		RefreshToken: tok.RefreshToken,
+		ExpiresIn:    tok.ExpiresIn,
 	}
 	teams, asserted := a.teamsFromClaims(c.raw)
 	if !asserted {

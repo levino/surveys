@@ -21,6 +21,11 @@ type Config struct {
 	OIDCIssuer       string
 	OIDCClientID     string
 	OIDCClientSecret string
+	// ZITADEL application key for private_key_jwt; wins over the secret.
+	OIDCClientKey *clientKey
+
+	// HMAC key of the ZITADEL Actions v2 target; empty = webhook off (404).
+	WebhookSigningKey string
 
 	GroupPrefix string
 	// A group ending in this suffix (e.g. ":admin") makes the user a
@@ -39,8 +44,8 @@ type Config struct {
 	ZitadelTeamProjects   map[string]string
 	ZitadelMaintainerRole string
 
-	// How old the provider tokens of a session may get before the next use
-	// refreshes them (and re-derives the teams).
+	// Upper bound for how long provider tokens are used before the next use
+	// refreshes them (and re-derives the teams); expires_in may shorten it.
 	RefreshInterval time.Duration
 }
 
@@ -51,8 +56,8 @@ func env(key, def string) string {
 	return def
 }
 
-func loadConfig() Config {
-	return Config{
+func loadConfig() (Config, error) {
+	cfg := Config{
 		BaseURL:          env("PUBLIC_BASE_URL", "http://localhost:8080"),
 		AppName:          env("PUBLIC_APP_NAME", "Surveys"),
 		Theme:            env("PUBLIC_THEME", "surveys"),
@@ -70,7 +75,12 @@ func loadConfig() Config {
 		ZitadelTeamProjects:   parseTeamProjects(env("ZITADEL_TEAM_PROJECTS", "")),
 		ZitadelMaintainerRole: env("ZITADEL_MAINTAINER_ROLE", "admin"),
 		RefreshInterval:       envDuration("OIDC_REFRESH_INTERVAL", 10*time.Minute),
+		WebhookSigningKey:     strings.TrimSpace(os.Getenv("ZITADEL_WEBHOOK_SIGNING_KEY")),
 	}
+	if err := applyClientKey(&cfg, os.Getenv("OIDC_CLIENT_KEY"), strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 // warnDeprecated logs (once, at start) about settings that are still
@@ -175,6 +185,8 @@ type App struct {
 
 	refreshMu    sync.Mutex
 	refreshLocks map[string]*sync.Mutex // idp session id -> serialises its refresh
+
+	credCheck credentialCache
 
 	cimd           cimdCache
 	cimdAllowLocal bool // tests only: allow http:// and loopback metadata hosts

@@ -14,7 +14,10 @@ import (
 )
 
 func main() {
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
 	warnDeprecated()
 	ui.Theme = cfg.Theme
 

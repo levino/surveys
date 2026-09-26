@@ -22,6 +22,8 @@ func (a *App) mountPublic(mux *http.ServeMux) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	mux.HandleFunc("GET /health", a.handleHealth)
+
 	mux.HandleFunc("GET /robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))

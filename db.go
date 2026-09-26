@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS idp_sessions (
   refresh_token TEXT,
   teams         TEXT NOT NULL DEFAULT '[]',
   refreshed_at  INTEGER NOT NULL,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  access_expires_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idp_sessions_sid ON idp_sessions(sid);
 CREATE INDEX IF NOT EXISTS idp_sessions_github ON idp_sessions(github_id);
@@ -168,6 +169,8 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN idp_session_id TEXT`)
 	_, _ = db.Exec(`ALTER TABLE oauth_codes ADD COLUMN idp_session_id TEXT`)
 	_, _ = db.Exec(`ALTER TABLE oauth_tokens ADD COLUMN idp_session_id TEXT`)
+	// Existing rows get 0 and are refreshed on their next use.
+	_, _ = db.Exec(`ALTER TABLE idp_sessions ADD COLUMN access_expires_at INTEGER NOT NULL DEFAULT 0`)
 	for _, q := range []string{
 		`CREATE INDEX IF NOT EXISTS sessions_idp ON sessions(idp_session_id)`,
 		`CREATE INDEX IF NOT EXISTS oauth_tokens_idp ON oauth_tokens(idp_session_id)`,
