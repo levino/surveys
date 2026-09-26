@@ -23,11 +23,11 @@ func newZitadelApp(t *testing.T, oidc *oidcMock) *App {
 	return app
 }
 
-// makeStale pretends the tokens of every provider session are older than
-// the refresh interval, so the next use must refresh.
+// makeStale pretends the access tokens of every provider session have
+// expired, so the next use must refresh.
 func makeStale(t *testing.T, app *App) {
 	t.Helper()
-	if _, err := app.db.Exec(`UPDATE idp_sessions SET refreshed_at = 0`); err != nil {
+	if _, err := app.db.Exec(`UPDATE idp_sessions SET refreshed_at = 0, access_expires_at = 0`); err != nil {
 		t.Fatal(err)
 	}
 }
