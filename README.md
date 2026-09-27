@@ -43,9 +43,14 @@ there says who the client is and where it may be redirected. The server
 fetches it (no redirects, public hosts only, 16 KiB cap, cached per
 `Cache-Control`), checks it is self-referential, and requires every
 `redirect_uri` to be same-origin with the document or a loopback address.
-There is **no dynamic client registration** and no client table to prune;
-public clients with PKCE (S256) only. The last good document is kept for
-seven days so a metadata-host outage does not break token refreshes.
+There is **no dynamic client registration**; public clients with PKCE (S256)
+only. Every `redirect_uri` must be https or http on a loopback address, without
+fragment or userinfo. The last good document is kept for seven days so a
+metadata-host outage does not break token refreshes; after that, copies no
+token refers to any more are purged hourly. `OAUTH_CLIENT_HOSTS` restricts which
+hosts may serve metadata documents at all (for Claude: `claude.ai`, which hosts
+the documents of the claude.ai connector — also used by Claude Desktop — and
+of Claude Code).
 
 Claude picks this mode by itself: the authorization-server metadata
 advertises `client_id_metadata_document_supported: true` and `"none"` in
@@ -53,9 +58,25 @@ advertises `client_id_metadata_document_supported: true` and `"none"` in
 `WWW-Authenticate: Bearer … resource_metadata=… scope="mcp"`, and the
 protected-resource metadata is served at both `/.well-known/oauth-protected-resource`
 and `…/mcp`. Loopback redirects (`http://localhost/…`, `http://127.0.0.1/…`)
-match with the port ignored (RFC 8252) so Claude Code's ephemeral port works;
-the consent page shows the client's **host** as the relying party and warns
-when the redirect goes to a local process.
+match with the port ignored (RFC 8252) so Claude Code's ephemeral port works.
+The consent page shows the client's **host** as the relying party, the
+self-asserted `client_name` marked as unverified, the redirect host
+prominently, and warns when the redirect goes to a local process or the host
+is not in `OAUTH_CLIENT_HOSTS`. Approval only counts from the browser session
+the page was shown to, and every authorization response carries `iss`
+(RFC 9207).
+
+### Browser hardening
+
+- State-changing requests from other origins (`Sec-Fetch-Site`, else `Origin`
+  vs. `Host`; Go's `http.CrossOriginProtection`) are refused with `403`.
+  Exempt: `POST /mcp` and `POST /oauth/token`, which authenticate by bearer
+  token / PKCE and read no cookies.
+- Over https all cookies carry the `__Host-` prefix. A cookie name sent twice
+  counts as absent. Sessions from before the prefix are still accepted under
+  the old name and moved; a session issued since then is refused there.
+- Every response forbids framing (`Content-Security-Policy: frame-ancestors
+  'none'`, `X-Frame-Options: DENY`).
 
 ## Configuration (env only, 12-factor)
 
@@ -77,6 +98,7 @@ when the redirect goes to a local process.
 | `ZITADEL_TEAM_PROJECTS` | –                     | `"<projectId>=<team-slug>,…"` — one team per ZITADEL project (see below) |
 | `ZITADEL_MAINTAINER_ROLE` | `admin`             | Role key in a team project that makes the user a maintainer |
 | `ZITADEL_WEBHOOK_SIGNING_KEY` | –               | Signing key of the ZITADEL Actions v2 target calling `POST /login/zitadel-events`; unset = the route answers 404 |
+| `OAUTH_CLIENT_HOSTS` | –                       | Comma-separated hosts allowed to serve Client ID Metadata Documents (e.g. `claude.ai`); unset = any public https host, with a warning on the consent page |
 | `DEFAULT_RETENTION_DAYS` | `0`                  | New surveys get `delete_at = now + N days` unless set explicitly. `0` = keep until deleted by hand |
 | `SESSION_SECRET`      | –                       | Salt for IP hashing (GDPR) |
 
@@ -129,7 +151,7 @@ they follow the same rule, including on their own refresh grant.
   deletes the matching sessions and MCP tokens — by `sid` (stored at login)
   or, without `sid`, every session of `sub`.
 
-- **Logout** (`/logout`) deletes the browser session and the login behind it
+- **Logout** (`POST /logout`) deletes the browser session and the login behind it
   (with its MCP tokens), revokes the refresh token at the provider's
   `revocation_endpoint` and continues at its `end_session_endpoint`
   (`client_id`, `post_logout_redirect_uri=<base>/`).

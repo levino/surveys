@@ -77,6 +77,7 @@ type ConsentData struct {
 	ClientID     string
 	RedirectHost string
 	Loopback     bool // redirect goes to a local process on the user's machine
+	Listed       bool // client host is in OAUTH_CLIENT_HOSTS
 	AuthzID      string
 	Scope        string
 }
@@ -108,7 +109,9 @@ templ navbar(appName, userName string) {
 		<div class="flex-1 px-2 font-semibold text-lg">{ appName }</div>
 		<div class="flex-none gap-2 items-center text-sm">
 			<span class="opacity-70">{ userName }</span>
-			<a class="btn btn-ghost btn-sm" href="/logout">Abmelden</a>
+			<form method="post" action="/logout">
+				<button class="btn btn-ghost btn-sm" type="submit">Abmelden</button>
+			</form>
 		</div>
 	</div>
 }
@@ -154,25 +157,36 @@ templ Consent(c ConsentData) {
 		<main class="hero min-h-screen">
 			<div class="hero-content">
 				<div class="card w-[28rem] max-w-full bg-base-100 shadow-md">
-					<div class="card-body">
+					<div class="card-body gap-3">
 						<h1 class="card-title">Zugriff erlauben?</h1>
 						<p>
 							Eine Anwendung von
-							<span class="font-semibold">{ c.ClientHost }</span>
-							if c.ClientName != "" {
-								<span class="opacity-70">(nennt sich „{ c.ClientName }")</span>
-							}
+							<span class="font-semibold font-mono">{ c.ClientHost }</span>
 							möchte als KI-Client auf deine Umfragen zugreifen.
 						</p>
-						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine Teams)</div>
-						<div class="text-sm opacity-70">Antwort geht an: <span class="font-mono">{ c.RedirectHost }</span></div>
+						if c.ClientName != "" {
+							<p class="text-sm">
+								Name, wie ihn die Anwendung selbst angibt (nicht geprüft):
+								<span class="font-semibold">„{ c.ClientName }“</span>
+							</p>
+						}
+						<div class="rounded-box border border-base-300 p-3">
+							<div class="text-sm opacity-70">Der Zugang geht nach deiner Zustimmung an</div>
+							<div class="text-lg font-semibold font-mono break-all">{ c.RedirectHost }</div>
+						</div>
 						if c.Loopback {
-							<div class="alert alert-warning text-sm mt-2">
+							<div class="alert alert-warning text-sm">
 								Die Antwort geht an ein Programm auf deinem eigenen Rechner. Erlaube das nur, wenn du diese Anmeldung gerade selbst von dort gestartet hast.
 							</div>
 						}
+						if !c.Listed {
+							<div class="alert alert-warning text-sm">
+								Diese Anwendung ist hier nicht als bekannter Client eingetragen. Erlaube den Zugriff nur, wenn du sie gerade selbst verbunden hast und { c.RedirectHost } kennst.
+							</div>
+						}
+						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine Teams)</div>
 						<div class="text-xs opacity-50 break-all">{ c.ClientID }</div>
-						<div class="card-actions justify-end mt-4">
+						<div class="card-actions justify-end mt-2">
 							<form method="post" action="/oauth/deny">
 								<input type="hidden" name="authz_id" value={ c.AuthzID }/>
 								<button class="btn btn-ghost" type="submit">Ablehnen</button>

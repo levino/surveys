@@ -83,6 +83,8 @@ type PendingAuthz struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Resource            string
+	// The browser session the consent page was shown to; only it may approve.
+	SessionID string
 }
 
 type beginAuthzInput struct {
@@ -102,6 +104,9 @@ func (a *App) beginAuthz(in beginAuthzInput) (*PendingAuthz, error) {
 		return nil, err
 	}
 	if client == nil {
+		if isClientIDURL(in.ClientID, a.cimdAllowLocal) && !a.clientHostAllowed(in.ClientID) {
+			return nil, newHTTPError(400, "invalid_client", "this server does not accept clients from that host")
+		}
 		return nil, newHTTPError(400, "invalid_client", "client_id must be an https URL serving a client metadata document")
 	}
 	if !redirectURIAllowed(client.RedirectURIs, in.RedirectURI) {
@@ -154,12 +159,13 @@ func (a *App) loadAuthzRequest(id string) (*PendingAuthz, error) {
 	var (
 		p                      PendingAuthz
 		scope, state, resource sql.NullString
+		sessionID              sql.NullString
 		expires                int64
 	)
 	err := a.db.QueryRow(
-		`SELECT id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, resource, expires_at
+		`SELECT id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, resource, expires_at, session_id
 		 FROM oauth_authz_requests WHERE id = ?`, id,
-	).Scan(&p.ID, &p.ClientID, &p.RedirectURI, &scope, &state, &p.CodeChallenge, &p.CodeChallengeMethod, &resource, &expires)
+	).Scan(&p.ID, &p.ClientID, &p.RedirectURI, &scope, &state, &p.CodeChallenge, &p.CodeChallengeMethod, &resource, &expires, &sessionID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -170,7 +176,7 @@ func (a *App) loadAuthzRequest(id string) (*PendingAuthz, error) {
 		_, _ = a.db.Exec(`DELETE FROM oauth_authz_requests WHERE id = ?`, id)
 		return nil, nil
 	}
-	p.Scope, p.State, p.Resource = scope.String, state.String, resource.String
+	p.Scope, p.State, p.Resource, p.SessionID = scope.String, state.String, resource.String, sessionID.String
 	return &p, nil
 }
 
@@ -180,13 +186,16 @@ type completedAuthz struct {
 	State       string
 }
 
-func (a *App) completeAuthz(authzID, githubID, idpSessionID string) (*completedAuthz, error) {
+func (a *App) completeAuthz(authzID, sessionID, githubID, idpSessionID string) (*completedAuthz, error) {
 	req, err := a.loadAuthzRequest(authzID)
 	if err != nil {
 		return nil, err
 	}
 	if req == nil {
 		return nil, newHTTPError(400, "invalid_request", "authorization request expired")
+	}
+	if req.SessionID == "" || req.SessionID != sessionID {
+		return nil, newHTTPError(403, "access_denied", "authorization request was not shown to this session")
 	}
 	code := genID("code")
 	now := nowMs()
@@ -461,18 +470,22 @@ func scopeIsSupported(scope string) bool {
 	return true
 }
 
+// validateRedirectURI: https, or http to a loopback address for native apps
+// (MCP authorization, "Communication Security"); never a fragment or userinfo.
 func validateRedirectURI(uri string) error {
-	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Scheme == "" {
-		return newHTTPError(400, "invalid_redirect_uri", "not a URL: "+uri)
+	u, err := url.Parse(uri)
+	switch {
+	case err != nil || !u.IsAbs() || u.Host == "":
+		return newHTTPError(400, "invalid_redirect_uri", "not an absolute URL: "+uri)
+	case u.Fragment != "" || strings.Contains(uri, "#"):
+		return newHTTPError(400, "invalid_redirect_uri", "redirect URI must not contain a fragment: "+uri)
+	case u.User != nil:
+		return newHTTPError(400, "invalid_redirect_uri", "redirect URI must not contain credentials: "+uri)
+	case u.Scheme == "https", isLoopback(u):
+		return nil
+	default:
+		return newHTTPError(400, "invalid_redirect_uri", "redirect URI must be https or http on a loopback address: "+uri)
 	}
-	if parsed.Scheme == "http" {
-		h := parsed.Hostname()
-		if h != "localhost" && h != "127.0.0.1" {
-			return newHTTPError(400, "invalid_redirect_uri", "http redirect URIs must use localhost/127.0.0.1")
-		}
-	}
-	return nil
 }
 
 // mcpResource is the canonical URI of the MCP server (RFC 8707 resource).

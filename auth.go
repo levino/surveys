@@ -110,7 +110,7 @@ func (a *App) createSession(subject, idpSessionID, userAgent string) (string, er
 	sid := genID("sess")
 	now := nowMs()
 	_, err := a.db.Exec(
-		`INSERT INTO sessions(id, github_id, created_at, expires_at, user_agent, last_seen_at, idp_session_id) VALUES (?,?,?,?,?,?,?)`,
+		`INSERT INTO sessions(id, github_id, created_at, expires_at, user_agent, last_seen_at, idp_session_id, host_cookie) VALUES (?,?,?,?,?,?,?,1)`,
 		sid, subject, now, now+sessionTTLMs, nullStr(userAgent), now, idpSessionID,
 	)
 	return sid, err
@@ -333,6 +333,13 @@ func (a *App) purgeAuth() {
 	_, _ = a.db.Exec(`DELETE FROM oauth_tokens WHERE expires_at < ?`, now)
 	_, _ = a.db.Exec(`DELETE FROM oauth_codes WHERE expires_at < ?`, now)
 	_, _ = a.db.Exec(`DELETE FROM oauth_authz_requests WHERE expires_at < ?`, now)
+	_, _ = a.db.Exec(
+		`DELETE FROM oauth_clients WHERE created_at < ?
+		   AND client_id NOT IN (SELECT client_id FROM oauth_tokens)
+		   AND client_id NOT IN (SELECT client_id FROM oauth_codes)`,
+		now-cimdStaleMax.Milliseconds(),
+	)
+	a.cimd.evictExpired()
 	_, _ = a.db.Exec(
 		`DELETE FROM idp_sessions WHERE created_at < ?
 		   AND id NOT IN (SELECT idp_session_id FROM sessions WHERE idp_session_id IS NOT NULL)

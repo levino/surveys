@@ -31,7 +31,7 @@ func (a *App) mountStatic(mux *http.ServeMux) {
 }
 
 func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
-	ctx, _ := a.resolveSession(cookieValue(r, sessionCookie))
+	ctx, _ := a.requestSession(w, r)
 	if ctx == nil {
 		a.renderPage(w, r, http.StatusOK, ui.Landing(a.cfg.AppName))
 		return
@@ -66,7 +66,7 @@ func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRevoke(w http.ResponseWriter, r *http.Request) {
-	ctx, _ := a.resolveSession(cookieValue(r, sessionCookie))
+	ctx, _ := a.requestSession(w, r)
 	if ctx == nil {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
