@@ -74,7 +74,7 @@ func (a *App) routes() http.Handler {
 	a.mountOauth(mux)
 	a.mountWebAuth(mux)
 	a.mountMcp(mux)
-	return mux
+	return securityHeaders(a.crossOriginProtection().Handler(mux))
 }
 
 func requestLogger(next http.Handler) http.Handler {

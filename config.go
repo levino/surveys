@@ -47,6 +47,9 @@ type Config struct {
 	// Upper bound for how long provider tokens are used before the next use
 	// refreshes them (and re-derives the teams); expires_in may shorten it.
 	RefreshInterval time.Duration
+
+	// Hosts whose Client ID Metadata Documents are accepted; empty = any.
+	OAuthClientHosts []string
 }
 
 func env(key, def string) string {
@@ -76,6 +79,7 @@ func loadConfig() (Config, error) {
 		ZitadelMaintainerRole: env("ZITADEL_MAINTAINER_ROLE", "admin"),
 		RefreshInterval:       envDuration("OIDC_REFRESH_INTERVAL", 10*time.Minute),
 		WebhookSigningKey:     strings.TrimSpace(os.Getenv("ZITADEL_WEBHOOK_SIGNING_KEY")),
+		OAuthClientHosts:      parseHostList(os.Getenv("OAUTH_CLIENT_HOSTS")),
 	}
 	if err := applyClientKey(&cfg, os.Getenv("OIDC_CLIENT_KEY"), strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))); err != nil {
 		return cfg, err
@@ -94,6 +98,16 @@ func warnDeprecated() {
 			})
 		}
 	}
+}
+
+func parseHostList(v string) []string {
+	var out []string
+	for _, h := range strings.Split(v, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // envDuration accepts a Go duration ("10m", "90s") or plain seconds.

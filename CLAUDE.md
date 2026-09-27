@@ -16,7 +16,8 @@ CSS. See `README.md` for the user-facing overview and configuration.
   dynamic registration, public clients + PKCE S256), login delegated to an
   upstream OIDC provider. `resolveClient` fetches/caches/persists the metadata
   document; `redirectURIAllowed` is exact-match except loopback (port
-  ignored). Discovery lives in `mountOauth`: keep the two flags Claude keys on
+  ignored); `OAUTH_CLIENT_HOSTS` is the CIMD trust policy (`security.go`).
+  Consent approval is bound to the session that saw the page. Discovery lives in `mountOauth`: keep the two flags Claude keys on
   (`client_id_metadata_document_supported`, `"none"` auth method), the
   path-suffixed PRM and the `WWW-Authenticate` challenge in `mcp.go` intact.
 - **Teams** come from the user's own OIDC tokens — never from a service
@@ -52,6 +53,11 @@ CSS. See `README.md` for the user-facing overview and configuration.
   Indexes on ALTERed columns belong in `migrate()`, not in `schema`.
 - **Markdown** (`md.go`): goldmark renders description + field `help`; raw HTML
   is escaped (not unsafe).
+
+- **Browser hardening** (`security.go`): `http.CrossOriginProtection` on
+  every route (bypass only `POST /mcp`, `POST /oauth/token`), framing headers,
+  `__Host-` cookies via `setCookie`/`cookieValue`; read the session only
+  through `requestSession` (migrates pre-prefix cookies, refuses planted ones).
 
 ## Build / test
 

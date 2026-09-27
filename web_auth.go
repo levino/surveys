@@ -63,7 +63,7 @@ func (a *App) mountWebAuth(mux *http.ServeMux) {
 			http.Error(w, "missing code/state", 400)
 			return
 		}
-		raw := cookieValue(r, stateCookie)
+		raw := a.cookieValue(r, stateCookie)
 		if raw == "" {
 			http.Error(w, "missing state cookie", 400)
 			return
@@ -98,15 +98,17 @@ func (a *App) mountWebAuth(mux *http.ServeMux) {
 		http.Redirect(w, r, next, http.StatusFound)
 	})
 
-	logout := func(w http.ResponseWriter, r *http.Request) {
-		if sid := cookieValue(r, sessionCookie); sid != "" {
+	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
+		sid, ok := uniqueCookie(r, a.cookieName(sessionCookie))
+		if !ok {
+			sid, _ = uniqueCookie(r, sessionCookie)
+		}
+		if sid != "" {
 			a.logoutSession(sid)
 		}
-		a.deleteCookie(w, sessionCookie)
+		a.clearSessionCookies(w)
 		http.Redirect(w, r, a.postLogoutTarget(), http.StatusFound)
-	}
-	mux.HandleFunc("POST /logout", logout)
-	mux.HandleFunc("GET /logout", logout)
+	})
 
 	// OIDC Back-Channel Logout 1.0: the provider POSTs a logout_token when a
 	// user's session there ends (logout, block, admin kill). Register

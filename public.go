@@ -56,7 +56,7 @@ func (a *App) resolveForm(key string) (*Form, error) {
 }
 
 func (a *App) formForWeb(w http.ResponseWriter, r *http.Request) (*AuthContext, *Form, bool) {
-	ctx, _ := a.resolveSession(cookieValue(r, sessionCookie))
+	ctx, _ := a.requestSession(w, r)
 	if ctx == nil {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusFound)
 		return nil, nil, false
@@ -227,7 +227,9 @@ func (a *App) handleFormPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) alreadySubmitted(r *http.Request, form *Form) bool {
-	return cookieValue(r, "submitted_"+form.ID) != ""
+	name := "submitted_" + form.ID
+	_, legacy := uniqueCookie(r, name)
+	return a.cookieValue(r, name) != "" || legacy
 }
 
 func tooFast(token string) bool {

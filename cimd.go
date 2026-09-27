@@ -50,6 +50,17 @@ type cimdCache struct {
 	entries map[string]cimdEntry
 }
 
+func (c *cimdCache) evictExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for id, e := range c.entries {
+		if now.After(e.expires) {
+			delete(c.entries, id)
+		}
+	}
+}
+
 // isClientIDURL reports whether id is a syntactically acceptable CIMD
 // client_id: https, a host, a real path, no fragment, no credentials.
 func isClientIDURL(id string, allowHTTP bool) bool {
@@ -206,7 +217,7 @@ func cacheTTL(cc string) time.Duration {
 // a fresh fetch, then (on fetch failure) the persisted last-good copy if it
 // is younger than cimdStaleMax. Anything else is an unknown client.
 func (a *App) resolveClient(clientID string) (*OAuthClient, error) {
-	if !isClientIDURL(clientID, a.cimdAllowLocal) {
+	if !isClientIDURL(clientID, a.cimdAllowLocal) || !a.clientHostAllowed(clientID) {
 		return nil, nil
 	}
 	a.cimd.mu.Lock()

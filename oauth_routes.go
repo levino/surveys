@@ -47,8 +47,10 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			// Clients register by URL: client_id is an https URL serving a
 			// client metadata document (no dynamic registration endpoint).
 			"client_id_metadata_document_supported": true,
-			"scopes_supported":                      supportedScopes,
-			"service_documentation":                 base + "/docs",
+			// RFC 9207: every authorization response names its issuer (mix-up defence).
+			"authorization_response_iss_parameter_supported": true,
+			"scopes_supported":      supportedScopes,
+			"service_documentation": base + "/docs",
 		})
 	}
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", asm)
@@ -75,8 +77,8 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			return
 		}
 
-		if auth, _ := a.resolveSession(cookieValue(r, sessionCookie)); auth != nil {
-			a.renderConsent(w, r, pending.ID)
+		if auth, sid := a.requestSession(w, r); auth != nil {
+			a.renderConsent(w, r, pending.ID, sid)
 			return
 		}
 
@@ -85,12 +87,12 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("GET /oauth/continue", func(w http.ResponseWriter, r *http.Request) {
-		pendingID := cookieValue(r, pendingCookie)
+		pendingID := a.cookieValue(r, pendingCookie)
 		if pendingID == "" {
 			http.Error(w, "no pending authorization", 400)
 			return
 		}
-		auth, _ := a.resolveSession(cookieValue(r, sessionCookie))
+		auth, sid := a.requestSession(w, r)
 		if auth == nil {
 			http.Error(w, "not authenticated", 401)
 			return
@@ -100,11 +102,11 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			return
 		}
 		a.deleteCookie(w, pendingCookie)
-		a.renderConsent(w, r, pendingID)
+		a.renderConsent(w, r, pendingID, sid)
 	})
 
 	mux.HandleFunc("POST /oauth/approve", func(w http.ResponseWriter, r *http.Request) {
-		auth, _ := a.resolveSession(cookieValue(r, sessionCookie))
+		auth, sid := a.requestSession(w, r)
 		if auth == nil {
 			http.Error(w, "not authenticated", 401)
 			return
@@ -115,7 +117,7 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			http.Error(w, "missing authz_id", 400)
 			return
 		}
-		a.finishAuthz(w, r, authzID, auth.User.GitHubID, auth.IdpSessionID)
+		a.finishAuthz(w, r, authzID, sid, auth.User.GitHubID, auth.IdpSessionID)
 	})
 
 	mux.HandleFunc("POST /oauth/deny", func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +136,7 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 		}
 		q := u.Query()
 		q.Set("error", "access_denied")
+		q.Set("iss", a.cfg.BaseURL)
 		if req.State != "" {
 			q.Set("state", req.State)
 		}
@@ -177,10 +180,14 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 	})
 }
 
-func (a *App) renderConsent(w http.ResponseWriter, r *http.Request, authzID string) {
+func (a *App) renderConsent(w http.ResponseWriter, r *http.Request, authzID, sessionID string) {
 	req, _ := a.loadAuthzRequest(authzID)
 	if req == nil {
 		http.Error(w, "authorization expired", 400)
+		return
+	}
+	if _, err := a.db.Exec(`UPDATE oauth_authz_requests SET session_id = ? WHERE id = ?`, sessionID, authzID); err != nil {
+		http.Error(w, "error", 500)
 		return
 	}
 	// The metadata document is self-asserted, so the trust anchor shown to the
@@ -197,12 +204,13 @@ func (a *App) renderConsent(w http.ResponseWriter, r *http.Request, authzID stri
 	}
 	a.renderPage(w, r, http.StatusOK, ui.Consent(ui.ConsentData{
 		AppName: a.cfg.AppName, ClientName: name, ClientHost: cu.Host, ClientID: req.ClientID,
-		RedirectHost: ru.Host, Loopback: isLoopback(ru), AuthzID: authzID, Scope: scope,
+		RedirectHost: ru.Host, Loopback: isLoopback(ru), Listed: a.clientHostListed(req.ClientID),
+		AuthzID: authzID, Scope: scope,
 	}))
 }
 
-func (a *App) finishAuthz(w http.ResponseWriter, r *http.Request, authzID, githubID, idpSessionID string) {
-	res, err := a.completeAuthz(authzID, githubID, idpSessionID)
+func (a *App) finishAuthz(w http.ResponseWriter, r *http.Request, authzID, sessionID, githubID, idpSessionID string) {
+	res, err := a.completeAuthz(authzID, sessionID, githubID, idpSessionID)
 	if err != nil {
 		if he, ok := err.(*httpError); ok {
 			http.Error(w, he.code+": "+he.message, he.status)
@@ -214,6 +222,7 @@ func (a *App) finishAuthz(w http.ResponseWriter, r *http.Request, authzID, githu
 	u, _ := url.Parse(res.RedirectURI)
 	q := u.Query()
 	q.Set("code", res.Code)
+	q.Set("iss", a.cfg.BaseURL)
 	if res.State != "" {
 		q.Set("state", res.State)
 	}

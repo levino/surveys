@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at   INTEGER NOT NULL,
   user_agent   TEXT,
   last_seen_at INTEGER,
-  idp_session_id TEXT
+  idp_session_id TEXT,
+  host_cookie  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
 
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS oauth_authz_requests (
   code_challenge_method TEXT NOT NULL DEFAULT 'S256',
   resource              TEXT,
   created_at            INTEGER NOT NULL,
-  expires_at            INTEGER NOT NULL
+  expires_at            INTEGER NOT NULL,
+  session_id            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS oauth_codes (
@@ -171,6 +173,8 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE oauth_tokens ADD COLUMN idp_session_id TEXT`)
 	// Existing rows get 0 and are refreshed on their next use.
 	_, _ = db.Exec(`ALTER TABLE idp_sessions ADD COLUMN access_expires_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN host_cookie INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE oauth_authz_requests ADD COLUMN session_id TEXT`)
 	for _, q := range []string{
 		`CREATE INDEX IF NOT EXISTS sessions_idp ON sessions(idp_session_id)`,
 		`CREATE INDEX IF NOT EXISTS oauth_tokens_idp ON oauth_tokens(idp_session_id)`,
