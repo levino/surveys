@@ -41,9 +41,19 @@ CSS. See `README.md` for the user-facing overview and configuration.
   revocation endpoint; `/healthz` stays liveness only. Provider down =
   deny (503) but keep the session. Never let a token without
   `idp_session_id` through.
-- **Authorization** (`auth.go` `canManage`): team members read; the creator
-  or a team maintainer (`IsMaintainer`, from `OIDC_MAINTAINER_SUFFIX`) writes.
-  Mutating tools go through `requireManagedForm`; never add a global admin.
+- **Authorization** (`auth.go` `canView`/`canManage`, the only place that
+  decides): `owner_team` is optional — `''` means "no team", the survey is the
+  creator's alone (kept `NOT NULL` so old rows need no table rebuild). Team
+  members read team surveys; `form_shares` (by lowercase e-mail) give read
+  access to single people, matched against `users.email` = the
+  `email_verified` address of the latest token (`verifiedEmail` in
+  `oidc.go`, re-stored on every login/refresh). The creator — for team
+  surveys also a team maintainer (`IsMaintainer`, from
+  `OIDC_MAINTAINER_SUFFIX`), both only while in the team — writes and edits
+  shares. Shares never grant writes. Forms carry `SharedWith` (loaded by every
+  `getForm*`/`listVisibleForms`); read access goes through
+  `formByIDForUser`/`formForWeb`, mutating tools through
+  `requireManagedForm`; never add a global admin.
 - **Retention** (`forms.go` `purgeDueForms`, `main.go` sweeper): `delete_at`
   per survey, default from `DEFAULT_RETENTION_DAYS`; due surveys are hidden by
   `isDue()`/`notDue` before the hourly purge removes them (submissions cascade).

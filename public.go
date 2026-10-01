@@ -33,6 +33,7 @@ func (a *App) mountPublic(mux *http.ServeMux) {
 	mux.HandleFunc("GET /docs", a.handleDocs)
 	mux.HandleFunc("GET /surveys/{ref}", a.handleSubmissions)
 	mux.HandleFunc("GET /surveys/{ref}/export.csv", a.handleSubmissionsCSV)
+	mux.HandleFunc("POST /surveys/{ref}/shares", a.handleShares)
 	mux.HandleFunc("POST /revoke", a.handleRevoke)
 	mux.HandleFunc("GET /f/{slug}", a.handleFormGet)
 	mux.HandleFunc("POST /f/{slug}", a.handleFormPost)
@@ -66,7 +67,7 @@ func (a *App) formForWeb(w http.ResponseWriter, r *http.Request) (*AuthContext, 
 		http.Error(w, "error", 500)
 		return nil, nil, false
 	}
-	if form == nil || form.isDue() || !ctx.isMember(form.OwnerTeam) {
+	if form == nil || form.isDue() || !ctx.canView(form) {
 		a.notice(w, r, 404, "Nicht gefunden", "Diese Umfrage existiert nicht oder du hast keinen Zugriff darauf.")
 		return nil, nil, false
 	}
@@ -101,6 +102,38 @@ func (a *App) handleSubmissionsCSV(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(exportCSV(form, subs)))
 }
 
+// handleShares adds or removes one share (form on the results page).
+func (a *App) handleShares(w http.ResponseWriter, r *http.Request) {
+	ctx, form, ok := a.formForWeb(w, r)
+	if !ok {
+		return
+	}
+	if !ctx.canManage(form) {
+		a.notice(w, r, 403, "Kein Zugriff", "Freigaben bearbeiten darf nur, wer die Umfrage angelegt hat (oder Maintainer des Teams ist).")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		a.notice(w, r, 400, "Fehler", "Die Anfrage konnte nicht verarbeitet werden.")
+		return
+	}
+	email := []string{r.PostForm.Get("email")}
+	var err error
+	switch r.PostForm.Get("action") {
+	case "add":
+		err = a.changeShares(form, email, nil, ctx.User.GitHubID)
+	case "remove":
+		err = a.changeShares(form, nil, email, ctx.User.GitHubID)
+	default:
+		a.notice(w, r, 400, "Fehler", "Unbekannte Aktion.")
+		return
+	}
+	if err != nil {
+		a.notice(w, r, 400, "Freigabe nicht möglich", err.Error())
+		return
+	}
+	http.Redirect(w, r, "/surveys/"+url.PathEscape(form.Ref), http.StatusSeeOther)
+}
+
 func submissionsView(a *App, ctx *AuthContext, form *Form, subs []*Submission) ui.SubmissionsData {
 	rows := make([]ui.SubmissionRow, 0, len(subs))
 	for i, s := range subs {
@@ -114,8 +147,15 @@ func submissionsView(a *App, ctx *AuthContext, form *Form, subs []*Submission) u
 		AppName: a.cfg.AppName, UserName: ctx.User.GitHubUsername,
 		Slug: form.Ref, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
 		PublicURL: form.publicURL(a.cfg.BaseURL), Count: len(subs), FieldCount: len(form.Fields),
-		Rows: rows,
+		Rows: rows, CanManage: ctx.canManage(form), SharedWith: sharesFor(ctx, form),
 	}
+}
+
+func sharesFor(ctx *AuthContext, f *Form) []string {
+	if ctx.canManage(f) {
+		return f.SharedWith
+	}
+	return nil
 }
 
 func displayValue(f FieldDef, v string) string {

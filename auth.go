@@ -20,6 +20,8 @@ type User struct {
 	Name           string
 	AvatarURL      string
 	CachedAt       int64
+	// Email: verified address from the latest token (lowercase), or "".
+	Email string
 }
 
 type AuthContext struct {
@@ -31,6 +33,9 @@ type AuthContext struct {
 }
 
 func (c *AuthContext) isMember(team string) bool {
+	if team == "" {
+		return false
+	}
 	for _, t := range c.Teams {
 		if t.Slug == team {
 			return true
@@ -48,17 +53,56 @@ func (c *AuthContext) isMaintainer(team string) bool {
 	return false
 }
 
-// canManage: who may change or delete a survey (and its submissions).
-// The creator always can; a team maintainer (e.g. the class's `admin` role)
-// can for surveys of that team. Plain team members may only read.
+func (c *AuthContext) isCreator(f *Form) bool {
+	return f.CreatedBy != "" && f.CreatedBy == c.User.GitHubID
+}
+
+// sharedWithMe: the survey is shared with the user's verified e-mail.
+func (c *AuthContext) sharedWithMe(f *Form) bool {
+	if c.User.Email == "" {
+		return false
+	}
+	for _, e := range f.SharedWith {
+		if e == c.User.Email {
+			return true
+		}
+	}
+	return false
+}
+
+// canView: who sees a survey and reads its results. A team survey: the
+// team's members. A survey without team (OwnerTeam == ""): its creator.
+// Either kind: everybody it is shared with by verified e-mail. f must carry
+// its SharedWith (all getForm*/list functions load it).
+func (c *AuthContext) canView(f *Form) bool {
+	if c == nil || c.User == nil || f == nil {
+		return false
+	}
+	if f.OwnerTeam == "" {
+		if c.isCreator(f) {
+			return true
+		}
+	} else if c.isMember(f.OwnerTeam) {
+		return true
+	}
+	return c.sharedWithMe(f)
+}
+
+// canManage: who may change or delete a survey (and its submissions) and
+// edit its shares. Without team: only the creator. Team survey: the creator
+// or a team maintainer (e.g. the class's `admin` role) — as long as they are
+// in the team. Plain team members and shares only read.
 func (c *AuthContext) canManage(f *Form) bool {
 	if c == nil || c.User == nil || f == nil {
 		return false
 	}
-	if f.CreatedBy != "" && f.CreatedBy == c.User.GitHubID {
-		return true
+	if f.OwnerTeam == "" {
+		return c.isCreator(f)
 	}
-	return c.isMaintainer(f.OwnerTeam)
+	if !c.isMember(f.OwnerTeam) {
+		return false
+	}
+	return c.isCreator(f) || c.isMaintainer(f.OwnerTeam)
 }
 
 func (c *AuthContext) teamSlugs() []string {
@@ -90,20 +134,27 @@ func (a *App) upsertUser(subject, username, name string) (*User, error) {
 
 func (a *App) readUser(id string) (*User, error) {
 	var (
-		u            User
-		name, avatar sql.NullString
+		u                   User
+		name, avatar, email sql.NullString
 	)
 	err := a.db.QueryRow(
-		`SELECT github_id, github_username, name, avatar_url, cached_at FROM users WHERE github_id = ?`, id,
-	).Scan(&u.GitHubID, &u.GitHubUsername, &name, &avatar, &u.CachedAt)
+		`SELECT github_id, github_username, name, avatar_url, cached_at, email FROM users WHERE github_id = ?`, id,
+	).Scan(&u.GitHubID, &u.GitHubUsername, &name, &avatar, &u.CachedAt, &email)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	u.Name, u.AvatarURL = name.String, avatar.String
+	u.Name, u.AvatarURL, u.Email = name.String, avatar.String, email.String
 	return &u, nil
+}
+
+// setUserEmail stores the verified e-mail of the latest token — or clears
+// it, when the provider no longer vouches for one.
+func (a *App) setUserEmail(subject, email string) error {
+	_, err := a.db.Exec(`UPDATE users SET email = ? WHERE github_id = ?`, nullStr(normalizeEmail(email)), subject)
+	return err
 }
 
 func (a *App) createSession(subject, idpSessionID, userAgent string) (string, error) {
@@ -270,6 +321,9 @@ func (a *App) freshIdpSession(id string) (*idpSession, error) {
 	if ident.Name != "" {
 		_, _ = a.upsertUser(s.Subject, ident.Name, ident.Name)
 	}
+	if err := a.setUserEmail(s.Subject, ident.Email); err != nil {
+		return nil, err
+	}
 	s.RefreshToken, s.SID, s.Teams, s.RefreshedAt, s.AccessExpiresAt = ident.RefreshToken, sid, ident.Teams, now, expires
 	return s, nil
 }
@@ -403,7 +457,13 @@ func (a *App) loginViaOIDC(code string, att loginAttempt, userAgent string) (*Us
 		return nil, "", err
 	}
 	username := strings.TrimSpace(ident.Name)
-	user, err := a.upsertUser(ident.Subject, username, ident.Name)
+	if _, err := a.upsertUser(ident.Subject, username, ident.Name); err != nil {
+		return nil, "", err
+	}
+	if err := a.setUserEmail(ident.Subject, ident.Email); err != nil {
+		return nil, "", err
+	}
+	user, err := a.readUser(ident.Subject)
 	if err != nil {
 		return nil, "", err
 	}

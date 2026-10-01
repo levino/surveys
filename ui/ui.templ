@@ -4,10 +4,11 @@ package ui
 type SurveyRow struct {
 	Slug        string
 	Title       string
-	OwnerTeam   string
+	OwnerTeam   string // "" = no team
 	Status      string
 	URL         string
 	Submissions int
+	SharedWithMe bool // visible to the viewer through a share by e-mail
 }
 
 type SubmissionCell struct {
@@ -26,12 +27,14 @@ type SubmissionsData struct {
 	UserName   string
 	Slug       string
 	Title      string
-	OwnerTeam  string
+	OwnerTeam  string // "" = no team
 	Status     string
 	PublicURL  string
 	Count      int
 	FieldCount int
 	Rows       []SubmissionRow
+	CanManage  bool
+	SharedWith []string // only filled for CanManage
 }
 
 type ClientRow struct {
@@ -102,6 +105,14 @@ templ Layout(title string) {
 			</script>
 		</body>
 	</html>
+}
+
+templ ownerBadge(team string) {
+	if team == "" {
+		<span class="badge badge-ghost" title="Ohne Team: nur der Ersteller und die Freigaben sehen sie">persönlich</span>
+	} else {
+		<span class="badge badge-ghost">{ team }</span>
+	}
 }
 
 templ navbar(appName, userName string) {
@@ -184,7 +195,7 @@ templ Consent(c ConsentData) {
 								Diese Anwendung ist hier nicht als bekannter Client eingetragen. Erlaube den Zugriff nur, wenn du sie gerade selbst verbunden hast und { c.RedirectHost } kennst.
 							</div>
 						}
-						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine Teams)</div>
+						<div class="text-sm opacity-70">Berechtigung: { c.Scope } (Umfragen anlegen, Einsendungen lesen — beschränkt auf deine eigenen, die deiner Teams und die mit dir geteilten)</div>
 						<div class="text-xs opacity-50 break-all">{ c.ClientID }</div>
 						<div class="card-actions justify-end mt-2">
 							<form method="post" action="/oauth/deny">
@@ -227,7 +238,11 @@ templ Dashboard(d DashboardData) {
 					</div>
 					if len(d.Surveys) == 0 {
 						<div class="alert mt-2">
-							<span>Noch keine Umfragen für deine Teams ({ d.Teams }). Leg die erste per KI an (Connector oben).</span>
+							if d.Teams != "" {
+								<span>Noch keine Umfragen für dich oder deine Teams ({ d.Teams }). Leg die erste per KI an (Connector oben) — für ein Team oder nur für dich.</span>
+							} else {
+								<span>Noch keine Umfragen. Leg die erste per KI an (Connector oben); ohne Team gehört sie nur dir, freigeben kannst du sie per E-Mail-Adresse.</span>
+							}
 						</div>
 					} else {
 						<div class="overflow-x-auto">
@@ -239,7 +254,12 @@ templ Dashboard(d DashboardData) {
 									for _, s := range d.Surveys {
 										<tr>
 											<td class="font-medium"><a class="link link-primary" href={ templ.SafeURL("/surveys/" + s.Slug) }>{ s.Title }</a></td>
-											<td><span class="badge badge-ghost">{ s.OwnerTeam }</span></td>
+											<td>
+												@ownerBadge(s.OwnerTeam)
+												if s.SharedWithMe {
+													<span class="badge badge-info badge-outline">mit dir geteilt</span>
+												}
+											</td>
 											<td>
 												if s.Status == "disabled" {
 													<span class="badge badge-error badge-outline">deaktiviert</span>
@@ -299,7 +319,7 @@ templ Submissions(d SubmissionsData) {
 					<div>
 						<h1 class="text-2xl font-bold">{ d.Title }</h1>
 						<div class="mt-1 flex items-center gap-2 text-sm">
-							<span class="badge badge-ghost">{ d.OwnerTeam }</span>
+							@ownerBadge(d.OwnerTeam)
 							if d.Status == "disabled" {
 								<span class="badge badge-error badge-outline">deaktiviert</span>
 							} else {
@@ -315,6 +335,37 @@ templ Submissions(d SubmissionsData) {
 					</div>
 				</div>
 			</div>
+			if d.CanManage {
+				<section class="card bg-base-100 shadow-sm">
+					<div class="card-body gap-2 p-4 md:p-5">
+						<h2 class="card-title text-base">Freigaben</h2>
+						<p class="text-sm opacity-70">
+							Personen mit diesen E-Mail-Adressen sehen die Umfrage und ihre Ergebnisse, sobald sie sich mit der (bestätigten) Adresse anmelden. Ändern und löschen können sie nichts.
+						</p>
+						if len(d.SharedWith) == 0 {
+							<p class="text-sm opacity-60">Noch keine Freigaben.</p>
+						} else {
+							<ul class="divide-y divide-base-200">
+								for _, e := range d.SharedWith {
+									<li class="flex items-center justify-between gap-2 py-1.5">
+										<span class="text-sm break-all">{ e }</span>
+										<form method="post" action={ templ.SafeURL("/surveys/" + d.Slug + "/shares") }>
+											<input type="hidden" name="action" value="remove"/>
+											<input type="hidden" name="email" value={ e }/>
+											<button class="btn btn-error btn-xs btn-outline" type="submit">Entfernen</button>
+										</form>
+									</li>
+								}
+							</ul>
+						}
+						<form method="post" action={ templ.SafeURL("/surveys/" + d.Slug + "/shares") } class="join w-full mt-1">
+							<input type="hidden" name="action" value="add"/>
+							<input type="email" name="email" required class="input input-bordered input-sm join-item w-full" placeholder="name@example.org" autocapitalize="off" autocorrect="off"/>
+							<button class="btn btn-primary btn-sm join-item" type="submit">Freigeben</button>
+						</form>
+					</div>
+				</section>
+			}
 			<div class="stats stats-horizontal bg-base-100 shadow w-full">
 				<div class="stat">
 					<div class="stat-title">Einsendungen</div>
@@ -571,6 +622,7 @@ templ Docs(appName, mcpURL string) {
 					</p>
 					<ul class="text-sm list-disc pl-5 space-y-1">
 						<li>„Leg eine Umfrage für Team <em>… </em> an mit den Feldern Name, Beruf und einem Freitext."</li>
+						<li>„Leg eine Umfrage nur für mich an und gib sie für <em>name@example.org</em> frei."</li>
 						<li>„Zeig mir die Einsendungen von Umfrage … als Tabelle."</li>
 						<li>„Exportiere die Antworten als CSV."</li>
 						<li>„Deaktiviere die Umfrage …"</li>
@@ -624,7 +676,8 @@ templ Docs(appName, mcpURL string) {
 					<ul class="text-sm space-y-1">
 						<li><span class="font-mono">title</span> — Titel (Pflicht).</li>
 						<li><span class="font-mono">description</span> — einleitender Text (Markdown).</li>
-						<li><span class="font-mono">owner_team</span> — das Team, dem die Umfrage gehört; nur dessen Mitglieder sehen die Ergebnisse (Pflicht).</li>
+						<li><span class="font-mono">owner_team</span> — optional: das Team, dem die Umfrage gehört; dessen Mitglieder sehen die Ergebnisse. Ohne Team gehört sie nur dir.</li>
+						<li><span class="font-mono">shared_with</span> — optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und die Ergebnisse lesen (nicht ändern). Sie melden sich mit dieser bestätigten Adresse an; später per <span class="font-mono">share_form</span> oder auf der Ergebnis-Seite änderbar.</li>
 						<li><span class="font-mono">allow_multiple</span> — mehrere Einsendungen pro Person erlauben (Default: ja).</li>
 						<li><span class="font-mono">expires_at</span> — Ablaufdatum; danach keine Einsendungen mehr.</li>
 						<li><span class="font-mono">status</span> — <span class="font-mono">active</span> oder <span class="font-mono">disabled</span>.</li>
@@ -640,7 +693,8 @@ templ Docs(appName, mcpURL string) {
 						und exportiert die KI sie über den Connector
 						(<span class="font-mono">list_submissions</span>,
 						<span class="font-mono">export_submissions</span> als CSV/JSON). Ergebnisse
-						sieht nur, wer Mitglied des <span class="font-mono">owner_team</span> ist.
+						sieht nur, wer Mitglied des <span class="font-mono">owner_team</span> ist, wer
+						die Umfrage angelegt hat oder wem sie per E-Mail-Adresse freigegeben wurde.
 						Einzelne Einsendungen lassen sich löschen.
 					</p>
 				</div>

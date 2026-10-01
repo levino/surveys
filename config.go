@@ -142,8 +142,8 @@ func envInt(key string, def int) int {
 
 func (c Config) callbackURL() string { return c.BaseURL + "/login/callback" }
 
-// loginScopes: OIDC_SCOPES plus, with ZITADEL_TEAM_PROJECTS, what the role
-// claims need — offline_access for the refresh token, the projects:roles
+// loginScopes: OIDC_SCOPES plus `email` (shares by e-mail) and, with
+// ZITADEL_TEAM_PROJECTS, what the role claims need — offline_access for the refresh token, the projects:roles
 // scope and one audience scope per team project.
 func (c Config) loginScopes() string {
 	scopes := strings.Fields(c.Scopes)
@@ -153,6 +153,7 @@ func (c Config) loginScopes() string {
 		}
 	}
 	add("openid")
+	add("email") // shares by e-mail need the (verified) address
 	if len(c.ZitadelTeamProjects) > 0 {
 		add("offline_access")
 		add(zitadelScopeProjectsRoles)

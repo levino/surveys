@@ -12,12 +12,18 @@ Two surfaces, nothing more:
    operations (create/edit surveys, read/export submissions) happen here, driven
    by an AI assistant such as Claude. **No REST API, no admin UI.**
 
-A survey belongs to a **group/team** taken from the user's own OIDC tokens
-(ZITADEL project roles or a `groups` claim). Every
-member of that team sees it and can read its results; **changing or deleting
-it is reserved for whoever created it** — and for the team's *maintainers*,
-if the provider marks any (see `OIDC_MAINTAINER_SUFFIX`). Nobody is a global
-admin: a maintainer of one team sees nothing of another.
+Every logged-in user may create surveys. A survey either belongs to a
+**group/team** taken from the user's own OIDC tokens (ZITADEL project roles or
+a `groups` claim) — every member of that team sees it and can read its
+results — or, without a team, to **its creator alone**. Either kind can be
+**shared with single people by e-mail address**: whoever logs in with that
+address (the provider must mark it `email_verified`; case does not matter)
+sees the survey and reads its results; the person need not have logged in
+before. **Changing, deleting or sharing a survey is reserved for whoever
+created it** — and, for team surveys, for the team's *maintainers*, if the
+provider marks any (see `OIDC_MAINTAINER_SUFFIX`). Team members and shares only
+read. Nobody is a global admin: a maintainer of one team sees nothing of
+another.
 
 Surveys are meant to be short-lived. Each one carries an optional `delete_at`;
 when it passes, the survey **and all its submissions** are purged
@@ -129,7 +135,15 @@ provider:
   secret (`OIDC_CLIENT_SECRET`)
 - Grant types: authorization code **and refresh token**
 - Scopes: `openid profile email offline_access groups` (plain OIDC) — for
-  ZITADEL see below
+  ZITADEL see below. `email` is always requested.
+
+**E-mail for shares.** At every login and refresh the service stores the
+user's `email` claim (lowercase) — but only when `email_verified` is `true`
+(boolean or the string `"true"`). A missing `email_verified` counts as
+unverified, so an address someone merely typed into their profile never
+unlocks a survey shared with it. If the ID token carries no `email` (ZITADEL
+without *User Info inside ID Token*), it is read from userinfo with the
+user's own access token.
 
 How sessions stay current: every login keeps the provider's **refresh token**
 server-side (never in the browser or the MCP client). When the tokens of a
@@ -206,6 +220,7 @@ tolerance). Effect:
 | `user.grant.removed`, `user.grant.cascade.removed`, `user.grant.deactivated` (team projects only) | the user's sessions end; without `userId` in the payload every session refreshes |
 | `user.grant.changed`, `user.grant.cascade.changed`, `user.grant.added`, `user.grant.reactivated` (team projects only) | the user's sessions refresh on their next request (teams re-read) |
 | `oidc_session.access_token.revoked`, `oidc_session.refresh_token.revoked` | every session refreshes (the revoked one fails and ends) |
+| `user.human.email.changed`, `user.human.email.verified` | the user's sessions refresh on their next request (verified e-mail re-read for shares) |
 
 `ZITADEL_SERVICE_TOKEN` and `ZITADEL_ORG_ID` (the former grants lookup) are
 accepted but ignored with a deprecation warning at start — remove them and the
@@ -245,9 +260,12 @@ authorization server through the `401` → protected-resource metadata → serve
 metadata chain, sees CIMD support and uses its own hosted client metadata
 document — nothing to choose or paste in the connector dialog.
 
-MCP tools: `list_teams`, `create_form`, `list_forms`, `get_form`, `update_form`,
-`disable_form`, `delete_form`, `list_submissions`, `export_submissions`,
-`delete_submission`.
+MCP tools: `list_teams`, `create_form` (`owner_team` optional, `shared_with`
+e-mails), `list_forms` (own, team and shared-with-me surveys), `get_form`,
+`update_form`, `share_form` (`add`/`remove` e-mails), `disable_form`,
+`delete_form`, `list_submissions`, `export_submissions`, `delete_submission`.
+`shared_with` is only shown to those who may manage the survey. Shares can
+also be edited on the survey's results page in the browser.
 
 ## Build & deploy
 

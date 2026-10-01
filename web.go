@@ -36,13 +36,14 @@ func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
 		a.renderPage(w, r, http.StatusOK, ui.Landing(a.cfg.AppName))
 		return
 	}
-	forms, _ := a.listFormsForTeams(ctx.teamSlugs())
+	forms, _ := a.listVisibleForms(ctx)
 	rows := make([]ui.SurveyRow, 0, len(forms))
 	for _, f := range forms {
 		n, _ := a.countSubmissions(f.ID)
 		rows = append(rows, ui.SurveyRow{
 			Slug: f.Ref, Title: f.Title, OwnerTeam: f.OwnerTeam, Status: f.Status,
 			URL: f.publicURL(a.cfg.BaseURL), Submissions: n,
+			SharedWithMe: ctx.sharedWithMe(f) && !ctx.isCreator(f),
 		})
 	}
 	clients, _ := a.listConnectedClients(ctx.User.GitHubID)

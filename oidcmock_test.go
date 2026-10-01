@@ -31,6 +31,10 @@ type mockUser struct {
 	groups  []string
 	roles   map[string][]string // projectId -> role keys
 	blocked bool
+	email   string
+	// emailVerified: the email_verified claim as sent (true, false, "true"
+	// …); nil omits it.
+	emailVerified any
 }
 
 type mockCode struct {
@@ -51,11 +55,13 @@ type oidcMock struct {
 	access         map[string]mockCode // access token -> grant
 	down           bool
 	noRolesInToken bool // like ZITADEL without "User roles inside ID Token"
-	badNonce       bool // return a wrong nonce
-	signWith       *rsa.PrivateKey
-	audOverride    string // mint ID tokens for another audience
-	refreshCalls   int
-	userinfoCalls  int
+	// like ZITADEL without "User Info inside ID Token": email only via userinfo
+	emailOnlyInUserinfo bool
+	badNonce            bool // return a wrong nonce
+	signWith            *rsa.PrivateKey
+	audOverride         string // mint ID tokens for another audience
+	refreshCalls        int
+	userinfoCalls       int
 
 	expiresIn  int            // expires_in of access tokens; 0 = omitted
 	sessionTag string         // appended to the sid of the next logins (another device)
@@ -222,6 +228,10 @@ func (m *oidcMock) token(w http.ResponseWriter, r *http.Request) {
 	m.access[at] = g
 	m.refresh[rt] = g
 	claims := m.claimsFor(g, !m.noRolesInToken)
+	if m.emailOnlyInUserinfo {
+		delete(claims, "email")
+		delete(claims, "email_verified")
+	}
 	aud := []string{mockClientID}
 	for _, s := range strings.Fields(g.scope) {
 		if strings.HasPrefix(s, "urn:zitadel:iam:org:project:id:") && strings.HasSuffix(s, ":aud") {
@@ -301,6 +311,12 @@ func (m *oidcMock) claimsFor(g mockCode, withRoles bool) map[string]any {
 	c := map[string]any{"sub": u.sub, "name": u.name}
 	if u.groups != nil {
 		c["groups"] = u.groups
+	}
+	if u.email != "" {
+		c["email"] = u.email
+		if u.emailVerified != nil {
+			c["email_verified"] = u.emailVerified
+		}
 	}
 	if withRoles && strings.Contains(g.scope, zitadelScopeProjectsRoles) {
 		for pid, roles := range u.roles {
