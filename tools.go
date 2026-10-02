@@ -33,20 +33,21 @@ func toolDefs() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "list_teams",
-			"description": "Teams (Klassen/Verbände), in denen der angemeldete Nutzer Mitglied ist, mit is_maintainer-Flag, plus die Standard-Aufbewahrung (retention_days) der Instanz. owner_team beim Anlegen einer Umfrage muss eines dieser Teams sein. Die Mitgliedschaft stammt aus den Tokens des Identity-Providers und wird etwa alle 10 Minuten aufgefrischt: eine neu vergebene oder entzogene Rolle wirkt spätestens dann, eine Abmeldung oder Sperre beim Provider sofort (die Verbindung muss danach neu autorisiert werden).",
+			"description": "Teams (Klassen/Verbände), in denen der angemeldete Nutzer Mitglied ist, mit is_maintainer-Flag, plus die Standard-Aufbewahrung (retention_days) der Instanz und die verifizierte E-Mail-Adresse des Nutzers (email; an diese Adresse freigegebene Umfragen sieht er). owner_team beim Anlegen einer Umfrage ist optional und muss, wenn gesetzt, eines dieser Teams sein — auch ohne Team darf jeder angemeldete Nutzer Umfragen anlegen. Die Mitgliedschaft stammt aus den Tokens des Identity-Providers und wird etwa alle 10 Minuten aufgefrischt: eine neu vergebene oder entzogene Rolle wirkt spätestens dann, eine Abmeldung oder Sperre beim Provider sofort (die Verbindung muss danach neu autorisiert werden).",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			"name":        "create_form",
-			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare Teilnahme-URL zurück (kein Login nötig, noindex). Die Umfrage gehört dem owner_team: alle Mitglieder dieses Teams sehen sie und lesen die Ergebnisse; ändern und löschen darf nur, wer sie angelegt hat (oder ein Maintainer des Teams). Datensparsamkeit: delete_at setzt, wann Umfrage und Einsendungen automatisch verschwinden.",
+			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare Teilnahme-URL zurück (kein Login nötig, noindex). Mit owner_team gehört die Umfrage dem Team: alle Mitglieder sehen sie und lesen die Ergebnisse. Ohne owner_team gehört sie nur dir. In beiden Fällen geben shared_with-Adressen einzelnen Personen Lesezugriff (sie melden sich mit dieser, verifizierten E-Mail-Adresse an; ein Konto vorab ist nicht nötig). Ändern, löschen und Freigaben bearbeiten darf nur, wer sie angelegt hat (oder ein Maintainer des Teams). Datensparsamkeit: delete_at setzt, wann Umfrage und Einsendungen automatisch verschwinden.",
 			"inputSchema": map[string]any{
 				"type":     "object",
-				"required": []string{"title", "owner_team", "fields"},
+				"required": []string{"title", "fields"},
 				"properties": map[string]any{
 					"title":          str,
 					"description":    str,
 					"ref":            map[string]any{"type": "string", "description": "Optionaler lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ohne Angabe aus dem Titel erzeugt."},
-					"owner_team":     map[string]any{"type": "string", "description": "Team-Slug (z. B. die Klasse), dem die Umfrage gehört — eines aus list_teams"},
+					"owner_team":     map[string]any{"type": "string", "description": "Optional: Team-Slug (z. B. die Klasse), dem die Umfrage gehört — eines aus list_teams. Weglassen = persönliche Umfrage, nur für dich und die Freigaben."},
+					"shared_with":    map[string]any{"type": "array", "items": str, "description": "Optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und ihre Ergebnisse lesen dürfen (nicht ändern). Groß-/Kleinschreibung egal."},
 					"expires_at":     map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr; Ergebnisse bleiben bis delete_at lesbar."},
 					"delete_at":      map[string]any{"type": "string", "description": "Löschdatum (RFC3339 oder YYYY-MM-DD): danach werden Umfrage UND alle Einsendungen automatisch gelöscht. Ohne Angabe gilt die Standard-Aufbewahrung der Instanz (siehe list_teams)."},
 					"allow_multiple": map[string]any{"type": "boolean", "description": "Mehrfach-Einsendungen pro Person erlauben (Default true)"},
@@ -72,12 +73,12 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "list_forms",
-			"description": "Listet die Umfragen der eigenen Teams (eigene und die der Klassen, in denen man Mitglied ist). can_manage sagt, ob der Nutzer sie ändern/löschen darf.",
+			"description": "Listet alle Umfragen, die der Nutzer sehen darf: die seiner Teams, seine eigenen ohne Team (owner_team \"\") und die an seine E-Mail-Adresse freigegebenen. can_manage sagt, ob der Nutzer sie ändern/löschen darf; nur dann steht shared_with (die Freigaben) dabei.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			"name":        "get_form",
-			"description": "Liest eine Umfrage inkl. Felddefinition und Anzahl Einsendungen.",
+			"description": "Liest eine Umfrage inkl. Felddefinition und Anzahl Einsendungen (und, wer sie verwalten darf, ihre Freigaben shared_with).",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str}},
 		},
 		{
@@ -92,6 +93,18 @@ func toolDefs() []map[string]any {
 					"expires_at": map[string]any{"type": "string", "description": "RFC3339/YYYY-MM-DD, oder \"\" zum Entfernen"},
 					"delete_at":  map[string]any{"type": "string", "description": "Löschdatum RFC3339/YYYY-MM-DD; \"\" entfernt es (nur ohne Standard-Aufbewahrung möglich)"},
 					"fields":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				},
+			},
+		},
+		{
+			"name":        "share_form",
+			"description": "Gibt eine Umfrage einzelnen Personen per E-Mail-Adresse frei (add) oder nimmt Freigaben zurück (remove). Freigegebene Personen sehen die Umfrage und lesen die Ergebnisse, sobald sie sich mit dieser — verifizierten — Adresse anmelden; ändern/löschen dürfen sie nicht. Groß-/Kleinschreibung egal. Nur Ersteller oder Team-Maintainer. Gibt die Freigaben danach zurück.",
+			"inputSchema": map[string]any{
+				"type": "object", "required": []string{"id"},
+				"properties": map[string]any{
+					"id":     str,
+					"add":    map[string]any{"type": "array", "items": str, "description": "Freizugebende E-Mail-Adressen"},
+					"remove": map[string]any{"type": "array", "items": str, "description": "E-Mail-Adressen, deren Freigabe endet"},
 				},
 			},
 		},
@@ -148,7 +161,7 @@ func (a *App) dispatchTool(name string, args json.RawMessage, ctx *AuthContext) 
 func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map[string]any, error) {
 	switch name {
 	case "list_teams":
-		return toolJSON(map[string]any{"teams": ctx.Teams, "retention_days": a.cfg.RetentionDays}), nil
+		return toolJSON(map[string]any{"teams": ctx.Teams, "retention_days": a.cfg.RetentionDays, "email": ctx.User.Email}), nil
 
 	case "create_form":
 		var in struct {
@@ -160,11 +173,13 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			DeleteAt      string     `json:"delete_at"`
 			AllowMultiple *bool      `json:"allow_multiple"`
 			Fields        []FieldDef `json:"fields"`
+			SharedWith    []string   `json:"shared_with"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
 		}
-		if !ctx.isMember(in.OwnerTeam) {
+		in.OwnerTeam = strings.TrimSpace(in.OwnerTeam)
+		if in.OwnerTeam != "" && !ctx.isMember(in.OwnerTeam) {
 			return toolErr(fmt.Sprintf("Du bist kein Mitglied des Teams %q. Deine Teams: %s", in.OwnerTeam, strings.Join(ctx.teamSlugs(), ", "))), nil
 		}
 		expires, err := parseExpiry(in.ExpiresAt)
@@ -182,6 +197,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		form, err := a.createForm(createFormInput{
 			Title: in.Title, Description: in.Description, Ref: in.Ref, Fields: in.Fields,
 			OwnerTeam: in.OwnerTeam, ExpiresAt: expires, AllowMultiple: allowMultiple, DeleteAt: deleteAt,
+			SharedWith: in.SharedWith,
 		}, ctx.User.GitHubID)
 		if err != nil {
 			return nil, err
@@ -191,24 +207,24 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 			"expires_at": isoOrEmpty(form.ExpiresAt), "delete_at": isoOrEmpty(form.DeleteAt),
-			"created_by": form.CreatedBy, "can_manage": true,
+			"created_by": form.CreatedBy, "can_manage": true, "shared_with": form.SharedWith,
 		}), nil
 
 	case "list_forms":
-		forms, err := a.listFormsForTeams(ctx.teamSlugs())
+		forms, err := a.listVisibleForms(ctx)
 		if err != nil {
 			return nil, err
 		}
 		out := make([]map[string]any, 0, len(forms))
 		for _, f := range forms {
 			n, _ := a.countSubmissions(f.ID)
-			out = append(out, map[string]any{
+			out = append(out, withShares(ctx, f, map[string]any{
 				"id": f.ID, "title": f.Title, "slug": f.Slug, "ref": f.Ref,
 				"url": f.publicURL(a.cfg.BaseURL), "results_url": f.resultsURL(a.cfg.BaseURL),
 				"owner_team": f.OwnerTeam, "status": f.Status, "submissions": n,
 				"expires_at": isoOrEmpty(f.ExpiresAt), "delete_at": isoOrEmpty(f.DeleteAt),
 				"created_at": isoMs(f.CreatedAt), "created_by": f.CreatedBy, "can_manage": ctx.canManage(f),
-			})
+			}))
 		}
 		return toolJSON(map[string]any{"forms": out}), nil
 
@@ -218,14 +234,14 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			return a.formAccessErr(err)
 		}
 		n, _ := a.countSubmissions(form.ID)
-		return toolJSON(map[string]any{
+		return toolJSON(withShares(ctx, form, map[string]any{
 			"id": form.ID, "title": form.Title, "description": form.Description, "slug": form.Slug, "ref": form.Ref,
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 			"allow_multiple": form.AllowMultiple, "expires_at": isoOrEmpty(form.ExpiresAt),
 			"delete_at": isoOrEmpty(form.DeleteAt), "created_by": form.CreatedBy, "can_manage": ctx.canManage(form),
 			"fields": form.Fields, "submissions": n, "created_at": isoMs(form.CreatedAt),
-		}), nil
+		})), nil
 
 	case "update_form":
 		form, err := a.requireManagedForm(args, ctx)
@@ -264,6 +280,23 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			return toolErr(err.Error()), nil
 		}
 		return toolJSON(map[string]any{"id": updated.ID, "status": updated.Status, "title": updated.Title, "expires_at": isoOrEmpty(updated.ExpiresAt), "delete_at": isoOrEmpty(updated.DeleteAt)}), nil
+
+	case "share_form":
+		form, err := a.requireManagedForm(args, ctx)
+		if err != nil {
+			return a.formAccessErr(err)
+		}
+		var in struct {
+			Add    []string `json:"add"`
+			Remove []string `json:"remove"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return nil, err
+		}
+		if err := a.changeShares(form, in.Add, in.Remove, ctx.User.GitHubID); err != nil {
+			return toolErr(err.Error()), nil
+		}
+		return toolJSON(map[string]any{"id": form.ID, "owner_team": form.OwnerTeam, "shared_with": form.SharedWith}), nil
 
 	case "disable_form":
 		form, err := a.requireManagedForm(args, ctx)
@@ -401,10 +434,19 @@ func (a *App) formByIDForUser(id string, ctx *AuthContext) (*Form, error) {
 	if form == nil || form.isDue() {
 		return nil, errFormNotFound
 	}
-	if !ctx.isMember(form.OwnerTeam) {
+	if !ctx.canView(form) {
 		return nil, errFormForbidden
 	}
 	return form, nil
+}
+
+// withShares adds shared_with for those who may manage the survey — the
+// others do not get to see who else has access.
+func withShares(ctx *AuthContext, f *Form, out map[string]any) map[string]any {
+	if ctx.canManage(f) {
+		out["shared_with"] = f.SharedWith
+	}
+	return out
 }
 
 func (a *App) formAccessErr(err error) (map[string]any, error) {
@@ -412,9 +454,9 @@ func (a *App) formAccessErr(err error) (map[string]any, error) {
 	case errFormNotFound:
 		return toolErr("Umfrage nicht gefunden"), nil
 	case errFormForbidden:
-		return toolErr("Kein Zugriff: die Umfrage gehört einem Team, in dem du nicht Mitglied bist."), nil
+		return toolErr("Kein Zugriff: die Umfrage gehört einem Team, in dem du nicht Mitglied bist, oder einer anderen Person und ist nicht an deine (verifizierte) E-Mail-Adresse freigegeben."), nil
 	case errFormNotManager:
-		return toolErr("Nur wer die Umfrage angelegt hat (oder Maintainer des Teams ist) darf sie ändern oder löschen. Ergebnisse lesen dürfen alle Mitglieder."), nil
+		return toolErr("Nur wer die Umfrage angelegt hat (oder Maintainer des Teams ist) darf sie ändern, löschen oder freigeben. Team-Mitglieder und Freigaben lesen nur die Ergebnisse."), nil
 	default:
 		return nil, err
 	}

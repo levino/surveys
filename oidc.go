@@ -123,6 +123,9 @@ type identity struct {
 	// Seconds the access token lives (expires_in); 0 = not sent.
 	ExpiresIn int64
 	Teams     []teamMembership
+	// Email: the verified address (lowercase), "" if none or unverified.
+	// Shares by e-mail match against it.
+	Email string
 }
 
 // idpRejected: the provider answered and said no (invalid_grant & co.). The
@@ -275,7 +278,10 @@ func (a *App) identityFrom(c jwtClaims, tok *tokenResponse) (*identity, error) {
 		ExpiresIn:    tok.ExpiresIn,
 	}
 	teams, asserted := a.teamsFromClaims(c.raw)
-	if !asserted {
+	id.Email = verifiedEmail(c)
+	// ZITADEL puts profile/email claims into the ID token only with "User
+	// Info inside ID Token"; otherwise userinfo has them.
+	if !asserted || !c.has("email") {
 		ui, err := a.userinfo(tok.AccessToken)
 		if err != nil {
 			// Do not guess teams; a rejection ends the session, anything
@@ -286,7 +292,12 @@ func (a *App) identityFrom(c jwtClaims, tok *tokenResponse) (*identity, error) {
 			if s := ui.str("sub"); s != id.Subject {
 				return nil, &idpRejected{status: 200, code: "userinfo_subject_mismatch"}
 			}
-			teams, _ = a.teamsFromClaims(ui.raw)
+			if !asserted {
+				teams, _ = a.teamsFromClaims(ui.raw)
+			}
+			if !c.has("email") {
+				id.Email = verifiedEmail(*ui)
+			}
 			if id.Name == "" {
 				id.Name = ui.str("name")
 			}
@@ -360,3 +371,33 @@ func (a *App) teamsFromClaims(claims map[string]json.RawMessage) ([]teamMembersh
 	}
 	return out, true
 }
+
+// verifiedEmail returns the email claim (trimmed, lowercase) only when
+// email_verified is true. A missing email_verified counts as unverified:
+// an address anybody can type into their profile must not unlock a survey
+// shared with that address. Some providers send the flag as a string.
+func verifiedEmail(c jwtClaims) string {
+	email := normalizeEmail(c.str("email"))
+	if email == "" {
+		return ""
+	}
+	raw, ok := c.raw["email_verified"]
+	if !ok {
+		return ""
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		if b {
+			return email
+		}
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil && strings.EqualFold(strings.TrimSpace(s), "true") {
+		return email
+	}
+	return ""
+}
+
+// normalizeEmail: the one form e-mail addresses are stored and compared in.
+func normalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }

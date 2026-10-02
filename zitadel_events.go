@@ -100,6 +100,9 @@ var (
 	revokeGrantEvents = set("user.grant.removed", "user.grant.cascade.removed", "user.grant.deactivated")
 	// Changed roles need no new login: the forced refresh re-reads them.
 	refreshGrantEvents = set("user.grant.changed", "user.grant.cascade.changed", "user.grant.added", "user.grant.reactivated")
+	// A changed or newly verified address: the forced refresh re-reads email
+	// and email_verified, which shares by e-mail are matched against.
+	emailEvents = set("user.human.email.changed", "user.human.email.verified")
 )
 
 func set(values ...string) map[string]bool {
@@ -122,6 +125,8 @@ func (a *App) handleZitadelEvent(ev zitadelEvent) eventOutcome {
 		return eventOutcome{Action: "revoke_user", Sub: agg, Sessions: a.endIdpSessions(typ, `github_id = ?`, agg)}
 	case userTokenEvents[typ] && agg != "":
 		return eventOutcome{Action: "revoke_sessions", Sub: agg, Sessions: a.endIdpSessions(typ, `github_id = ?`, agg)}
+	case emailEvents[typ] && agg != "":
+		return eventOutcome{Action: "refresh_user", Sub: agg, Sessions: a.forceRefresh(`github_id = ?`, agg)}
 	case typ == "session.terminated" && agg != "":
 		var sub string
 		if a.db.QueryRow(`SELECT github_id FROM idp_sessions WHERE sid = ? LIMIT 1`, agg).Scan(&sub) != nil {

@@ -30,21 +30,25 @@ var (
 )
 
 type Form struct {
-	ID            string     `json:"id"`
-	Slug          string     `json:"slug"`
-	Ref           string     `json:"ref"`
-	Title         string     `json:"title"`
-	Description   string     `json:"description,omitempty"`
-	Fields        []FieldDef `json:"fields"`
-	OwnerTeam     string     `json:"owner_team"`
-	Status        string     `json:"status"`
-	AllowMultiple bool       `json:"allow_multiple"`
-	ExpiresAt     int64      `json:"expires_at,omitempty"`
-	CreatedBy     string     `json:"created_by,omitempty"`
-	CreatedAt     int64      `json:"created_at"`
+	ID          string     `json:"id"`
+	Slug        string     `json:"slug"`
+	Ref         string     `json:"ref"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Fields      []FieldDef `json:"fields"`
+	// OwnerTeam "" = no team: only the creator (and the shares) see it.
+	OwnerTeam     string `json:"owner_team"`
+	Status        string `json:"status"`
+	AllowMultiple bool   `json:"allow_multiple"`
+	ExpiresAt     int64  `json:"expires_at,omitempty"`
+	CreatedBy     string `json:"created_by,omitempty"`
+	CreatedAt     int64  `json:"created_at"`
 	// DeleteAt: the survey and ALL its submissions are purged after this
 	// point (data minimisation). 0 = keep until deleted by hand.
 	DeleteAt int64 `json:"delete_at,omitempty"`
+	// SharedWith: e-mail addresses (lowercase) with read access, loaded
+	// with the form. Shown only to those who may manage it.
+	SharedWith []string `json:"-"`
 }
 
 func (f *Form) publicURL(base string) string { return base + "/f/" + f.Slug }
@@ -156,16 +160,19 @@ type createFormInput struct {
 	ExpiresAt     int64
 	AllowMultiple bool
 	DeleteAt      int64
+	SharedWith    []string
 }
 
 func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 	if strings.TrimSpace(in.Title) == "" {
 		return nil, fmt.Errorf("title is required")
 	}
-	if strings.TrimSpace(in.OwnerTeam) == "" {
-		return nil, fmt.Errorf("owner_team is required")
-	}
+	in.OwnerTeam = strings.TrimSpace(in.OwnerTeam)
 	if err := validateFieldDefs(in.Fields); err != nil {
+		return nil, err
+	}
+	shares, err := normalizeShareEmails(in.SharedWith)
+	if err != nil {
 		return nil, err
 	}
 	fieldsJSON, _ := json.Marshal(in.Fields)
@@ -205,7 +212,11 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 			f.ID, f.Slug, f.Ref, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt, msPtr(f.DeleteAt),
 		)
 		if err == nil {
-			return f, nil
+			if err := a.addShares(f.ID, shares, createdBy); err != nil {
+				_, _ = a.deleteForm(f.ID)
+				return nil, err
+			}
+			return f, a.loadShares(f)
 		}
 		lastErr = err
 		if !strings.Contains(err.Error(), "UNIQUE") {
@@ -241,56 +252,175 @@ const notDue = `(delete_at IS NULL OR delete_at = 0 OR delete_at > ?)`
 
 func (a *App) getFormByRef(ref string) (*Form, error) {
 	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE ref = ?`, ref)
-	f, err := scanForm(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return f, err
+	return a.scanFormWithShares(row)
 }
 
 func (a *App) getFormByID(id string) (*Form, error) {
 	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE id = ?`, id)
-	f, err := scanForm(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return f, err
+	return a.scanFormWithShares(row)
 }
 
 func (a *App) getFormBySlug(slug string) (*Form, error) {
 	row := a.db.QueryRow(`SELECT `+formCols+` FROM forms WHERE slug = ?`, slug)
+	return a.scanFormWithShares(row)
+}
+
+func (a *App) scanFormWithShares(row *sql.Row) (*Form, error) {
 	f, err := scanForm(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return f, err
-}
-
-func (a *App) listFormsForTeams(teams []string) ([]*Form, error) {
-	if len(teams) == 0 {
-		return nil, nil
-	}
-	ph := make([]string, len(teams))
-	args := make([]any, len(teams))
-	for i, t := range teams {
-		ph[i] = "?"
-		args[i] = t
-	}
-	args = append(args, nowMs())
-	rows, err := a.db.Query(`SELECT `+formCols+` FROM forms WHERE owner_team IN (`+strings.Join(ph, ",")+`) AND `+notDue+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Form
+	return f, a.loadShares(f)
+}
+
+// listVisibleForms: every survey ctx may see — its teams', its own without
+// team, and those shared with its verified e-mail. The SQL narrows the
+// candidates; ctx.canView decides.
+func (a *App) listVisibleForms(ctx *AuthContext) ([]*Form, error) {
+	conds := []string{`(owner_team = '' AND created_by = ?)`}
+	args := []any{ctx.User.GitHubID}
+	if teams := ctx.teamSlugs(); len(teams) > 0 {
+		ph := make([]string, len(teams))
+		for i, t := range teams {
+			ph[i] = "?"
+			args = append(args, t)
+		}
+		conds = append(conds, `owner_team IN (`+strings.Join(ph, ",")+`)`)
+	}
+	if ctx.User.Email != "" {
+		conds = append(conds, `id IN (SELECT form_id FROM form_shares WHERE email = ?)`)
+		args = append(args, ctx.User.Email)
+	}
+	args = append(args, nowMs())
+	rows, err := a.db.Query(`SELECT `+formCols+` FROM forms WHERE (`+strings.Join(conds, " OR ")+`) AND `+notDue+` ORDER BY created_at DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []*Form
 	for rows.Next() {
 		f, err := scanForm(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		out = append(out, f)
+		candidates = append(candidates, f)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []*Form
+	for _, f := range candidates {
+		if err := a.loadShares(f); err != nil {
+			return nil, err
+		}
+		if ctx.canView(f) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// ---- shares ----------------------------------------------------------------
+
+const maxShares = 100
+
+// normalizeShareEmails trims, lowercases, validates and de-duplicates.
+func normalizeShareEmails(in []string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range in {
+		e := normalizeEmail(raw)
+		if e == "" {
+			continue
+		}
+		if !emailRe.MatchString(e) {
+			return nil, fmt.Errorf("%q ist keine gültige E-Mail-Adresse", raw)
+		}
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	if len(out) > maxShares {
+		return nil, fmt.Errorf("höchstens %d Freigaben pro Umfrage", maxShares)
+	}
+	return out, nil
+}
+
+func (a *App) loadShares(f *Form) error {
+	rows, err := a.db.Query(`SELECT email FROM form_shares WHERE form_id = ? ORDER BY email`, f.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	f.SharedWith = []string{}
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return err
+		}
+		f.SharedWith = append(f.SharedWith, e)
+	}
+	return rows.Err()
+}
+
+// addShares: emails must be normalised (normalizeShareEmails). Idempotent.
+func (a *App) addShares(formID string, emails []string, by string) error {
+	existing := &Form{ID: formID}
+	if err := a.loadShares(existing); err != nil {
+		return err
+	}
+	n := len(existing.SharedWith)
+	for _, e := range emails {
+		if !contains(existing.SharedWith, e) {
+			n++
+		}
+	}
+	if n > maxShares {
+		return fmt.Errorf("höchstens %d Freigaben pro Umfrage", maxShares)
+	}
+	for _, e := range emails {
+		if _, err := a.db.Exec(
+			`INSERT INTO form_shares(form_id, email, created_by, created_at) VALUES (?,?,?,?) ON CONFLICT(form_id, email) DO NOTHING`,
+			formID, e, nullStr(by), nowMs(),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// changeShares validates add/remove, applies them and reloads f.SharedWith.
+// The caller has checked canManage.
+func (a *App) changeShares(f *Form, add, remove []string, by string) error {
+	addN, err := normalizeShareEmails(add)
+	if err != nil {
+		return err
+	}
+	remN, err := normalizeShareEmails(remove)
+	if err != nil {
+		return err
+	}
+	if err := a.removeShares(f.ID, remN); err != nil {
+		return err
+	}
+	if err := a.addShares(f.ID, addN, by); err != nil {
+		return err
+	}
+	return a.loadShares(f)
+}
+
+func (a *App) removeShares(formID string, emails []string) error {
+	for _, e := range emails {
+		if _, err := a.db.Exec(`DELETE FROM form_shares WHERE form_id = ? AND email = ?`, formID, e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type formPatch struct {

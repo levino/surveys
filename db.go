@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS users (
   github_username  TEXT NOT NULL,
   name             TEXT,
   avatar_url       TEXT,
-  cached_at        INTEGER NOT NULL
+  cached_at        INTEGER NOT NULL,
+  -- verified e-mail from the latest token (lowercase); NULL = none/unverified
+  email            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS user_teams (
@@ -114,7 +116,8 @@ CREATE TABLE IF NOT EXISTS forms (
   title          TEXT NOT NULL,
   description    TEXT,
   fields         TEXT NOT NULL DEFAULT '[]',
-  owner_team     TEXT NOT NULL,
+  -- '' = no team: the survey belongs to its creator alone (plus shares)
+  owner_team     TEXT NOT NULL DEFAULT '',
   status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   allow_multiple INTEGER NOT NULL DEFAULT 1,
   expires_at     INTEGER,
@@ -133,6 +136,17 @@ CREATE TABLE IF NOT EXISTS submissions (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS submissions_form ON submissions(form_id, created_at);
+
+-- Read access for single people, by e-mail (lowercase). Matched against the
+-- verified email claim of whoever logs in; they need not have logged in yet.
+CREATE TABLE IF NOT EXISTS form_shares (
+  form_id    TEXT NOT NULL REFERENCES forms(id) ON DELETE CASCADE,
+  email      TEXT NOT NULL,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (form_id, email)
+);
+CREATE INDEX IF NOT EXISTS form_shares_email ON form_shares(email);
 `
 
 type DB struct{ *sql.DB }
@@ -175,6 +189,9 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE idp_sessions ADD COLUMN access_expires_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN host_cookie INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE oauth_authz_requests ADD COLUMN session_id TEXT`)
+	// Filled at the next login/refresh. forms.owner_team stays NOT NULL:
+	// '' means "no team", so existing rows need no table rebuild.
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN email TEXT`)
 	for _, q := range []string{
 		`CREATE INDEX IF NOT EXISTS sessions_idp ON sessions(idp_session_id)`,
 		`CREATE INDEX IF NOT EXISTS oauth_tokens_idp ON oauth_tokens(idp_session_id)`,
