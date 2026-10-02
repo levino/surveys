@@ -163,6 +163,26 @@ templ Login(appName, startHref string) {
 	}
 }
 
+// NoTeam: the login was refused because the account is in no team
+// (OIDC_REQUIRE_TEAM). logoutHref ends the login at the provider, so another
+// account can be chosen.
+templ NoTeam(appName, logoutHref string) {
+	@Layout("Kein Zugang") {
+		<main class="hero min-h-screen">
+			<div class="hero-content">
+				<div class="card w-96 bg-base-100 shadow-md">
+					<div class="card-body items-center text-center">
+						<h1 class="card-title">Kein Zugang</h1>
+						<p class="opacity-70">Das Umfrage-Tool steht nur Mitgliedern offen. Ihr Konto ist keinem Team zugeordnet.</p>
+						<p class="opacity-70 text-sm">Wenn Sie meinen, dass das ein Fehler ist, wenden Sie sich an Ihre Ansprechperson. Mit einem anderen Konto anmelden: erst hier abmelden.</p>
+						<a class="btn btn-primary mt-2" href={ templ.SafeURL(logoutHref) }>Abmelden</a>
+					</div>
+				</div>
+			</div>
+		</main>
+	}
+}
+
 templ Consent(c ConsentData) {
 	@Layout("Zugriff erlauben") {
 		<main class="hero min-h-screen">
@@ -594,7 +614,7 @@ func fieldTypeRows() []docField {
 	}
 }
 
-templ Docs(appName, mcpURL string) {
+templ Docs(appName, mcpURL string, requireTeam bool) {
 	@Layout("Dokumentation – " + appName) {
 		<main class="max-w-3xl mx-auto p-4 md:p-6 space-y-6">
 			<div class="flex items-center justify-between">
@@ -677,7 +697,11 @@ templ Docs(appName, mcpURL string) {
 						<li><span class="font-mono">title</span> — Titel (Pflicht).</li>
 						<li><span class="font-mono">description</span> — einleitender Text (Markdown).</li>
 						<li><span class="font-mono">owner_team</span> — optional: das Team, dem die Umfrage gehört; dessen Mitglieder sehen die Ergebnisse. Ohne Team gehört sie nur dir.</li>
-						<li><span class="font-mono">shared_with</span> — optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und die Ergebnisse lesen (nicht ändern). Sie melden sich mit dieser bestätigten Adresse an; später per <span class="font-mono">share_form</span> oder auf der Ergebnis-Seite änderbar.</li>
+						<li><span class="font-mono">shared_with</span> — optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und die Ergebnisse lesen (nicht ändern). Sie melden sich mit dieser bestätigten Adresse an; später per <span class="font-mono">share_form</span> oder auf der Ergebnis-Seite änderbar.
+							if requireTeam {
+								Anmelden dürfen hier aber nur Mitglieder eines Teams: Wer keinem Team angehört, kann sich trotz Freigabe nicht anmelden.
+							}
+						</li>
 						<li><span class="font-mono">allow_multiple</span> — mehrere Einsendungen pro Person erlauben (Default: ja).</li>
 						<li><span class="font-mono">expires_at</span> — Ablaufdatum; danach keine Einsendungen mehr.</li>
 						<li><span class="font-mono">status</span> — <span class="font-mono">active</span> oder <span class="font-mono">disabled</span>.</li>

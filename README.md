@@ -100,6 +100,7 @@ the page was shown to, and every authorization response carries `iss`
 | `OIDC_GROUP_PREFIX`   | `` (empty)              | Prefix stripped from `groups` to form the team slug |
 | `OIDC_MAINTAINER_SUFFIX` | `` (empty)           | A group ending in this suffix (e.g. `:admin`) makes the user a maintainer of the team named by the rest — maintainers may change/delete every survey of that team |
 | `OIDC_SCOPES`         | `openid profile email offline_access groups` | Scopes requested at login. With `ZITADEL_TEAM_PROJECTS` the ZITADEL role/audience scopes and `offline_access` are added automatically |
+| `OIDC_REQUIRE_TEAM`   | `false`                 | `true` = only members may log in (web and MCP): whoever has no team — no role in any `ZITADEL_TEAM_PROJECTS` project, or no valid group — gets no session and no MCP token (see *Members only* below). Not a boolean = the start fails |
 | `OIDC_REFRESH_INTERVAL` | `10m`                 | Upper bound for using the provider's access token: it is refreshed on the next request (browser or MCP) once it expires (`expires_in`) or is older than this, and the teams are re-derived. Go duration or seconds |
 | `ZITADEL_TEAM_PROJECTS` | –                     | `"<projectId>=<team-slug>,…"` — one team per ZITADEL project (see below) |
 | `ZITADEL_MAINTAINER_ROLE` | `admin`             | Role key in a team project that makes the user a maintainer |
@@ -176,6 +177,31 @@ Every ID token is verified against the provider's JWKS (`iss`, `aud`/`azp`,
 After upgrading from a version without this binding, existing browser
 sessions and MCP tokens are no longer accepted: everybody logs in once more,
 and MCP clients re-authorize.
+
+### Members only (`OIDC_REQUIRE_TEAM`)
+
+By default every account the provider vouches for may log in; without a team
+it only sees its own surveys and those shared with it. With
+`OIDC_REQUIRE_TEAM=true` only **members** get in — members being users with
+at least one team (any role in one of the `ZITADEL_TEAM_PROJECTS`, or with
+the `groups` setup at least one valid group). The check is done by this
+service, not by the provider, so the OIDC client may sit in a project
+without role check and the team roles still arrive unfiltered.
+
+- **Login** (browser and the MCP client's OAuth flow, which logs in through
+  the same callback): no team → `403` page *„Das Umfrage-Tool steht nur
+  Mitgliedern offen …“* with a link to the provider's `end_session_endpoint`
+  (to log in with another account). Nothing is stored — no session, no
+  provider refresh token, no MCP code or token.
+- **No team claims at all** counts as *no team*: ZITADEL omits a project's
+  roles claim when the user has no role there; when the ID token and then
+  userinfo carry none, the login is refused (not an error, never a pass).
+- **Refresh** (every `OIDC_REFRESH_INTERVAL`, or at once after a
+  `user.grant.*` event): whoever has lost their last team loses their
+  browser sessions and MCP tokens, as on a back-channel logout. Existing
+  sessions are not checked at start, only at their next regular refresh.
+- **Shares by e-mail** still work, but a share alone does not let anyone in:
+  a person without a team cannot log in to use it.
 
 ### ZITADEL: teams from the user's project roles (recommended)
 

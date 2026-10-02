@@ -30,7 +30,9 @@ CSS. See `README.md` for the user-facing overview and configuration.
   tokens carry its `idp_session_id`. `freshIdpSession` (`auth.go`) refreshes
   once `access_expires_at` (from `expires_in`, capped by
   `OIDC_REFRESH_INTERVAL`) is reached (serialised per session — refresh
-  tokens rotate); a rejected refresh, a back-channel logout
+  tokens rotate); with `OIDC_REQUIRE_TEAM` (`lacksTeam`) a login without
+  any team is refused (`errNoTeam`, 403 page, nothing stored) and a refresh
+  that shows no team left ends the session; a rejected refresh, a back-channel logout
   (`POST /login/backchannel-logout`, `web_auth.go`), a logout or a signed
   ZITADEL event (`POST /login/zitadel-events`, `zitadel_events.go`) runs
   `endIdpSessions`, which deletes the browser sessions and MCP tokens with

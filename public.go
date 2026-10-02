@@ -40,7 +40,7 @@ func (a *App) mountPublic(mux *http.ServeMux) {
 }
 
 func (a *App) handleDocs(w http.ResponseWriter, r *http.Request) {
-	a.renderPage(w, r, http.StatusOK, ui.Docs(a.cfg.AppName, a.cfg.BaseURL+"/mcp"))
+	a.renderPage(w, r, http.StatusOK, ui.Docs(a.cfg.AppName, a.cfg.BaseURL+"/mcp", a.cfg.RequireTeam))
 }
 
 func (a *App) resolveForm(key string) (*Form, error) {

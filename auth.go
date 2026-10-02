@@ -179,7 +179,17 @@ var (
 	errSessionEnded = errors.New("session ended")
 	// errIdPUnavailable: could not refresh right now. Deny, keep the session.
 	errIdPUnavailable = errors.New("identity provider unavailable")
+	// errNoTeam: login refused under OIDC_REQUIRE_TEAM — the provider
+	// vouches for the user, but they are in no team.
+	errNoTeam = errors.New("not a member of any team")
 )
+
+// lacksTeam: with OIDC_REQUIRE_TEAM, a user without any team may not log in
+// (nor keep a session). No team claims at all — ZITADEL omits the claim of
+// a project without roles, and userinfo had none either — means no team.
+func (a *App) lacksTeam(teams []teamMembership) bool {
+	return a.cfg.RequireTeam && len(teams) == 0
+}
 
 type idpSession struct {
 	ID           string
@@ -304,6 +314,11 @@ func (a *App) freshIdpSession(id string) (*idpSession, error) {
 		}
 		logJSON("error", "token refresh failed, denying", map[string]any{"user": s.Subject, "err": err.Error()})
 		return nil, errIdPUnavailable
+	}
+	if a.lacksTeam(ident.Teams) {
+		// Lost the last team: same as a back-channel logout.
+		a.endIdpSessions("no team left", `id = ?`, id)
+		return nil, errSessionEnded
 	}
 	teams, _ := json.Marshal(nonNilTeams(ident.Teams))
 	sid := s.SID
@@ -455,6 +470,13 @@ func (a *App) loginViaOIDC(code string, att loginAttempt, userAgent string) (*Us
 	ident, err := a.oidcExchange(code, att)
 	if err != nil {
 		return nil, "", err
+	}
+	if a.lacksTeam(ident.Teams) {
+		// Nothing is stored: no user row, no provider session, no refresh
+		// token. The provider's login stays; the refusal page offers its
+		// end_session so another account can be used.
+		logJSON("info", "login refused: no team", map[string]any{"sub": ident.Subject})
+		return nil, "", errNoTeam
 	}
 	username := strings.TrimSpace(ident.Name)
 	if _, err := a.upsertUser(ident.Subject, username, ident.Name); err != nil {

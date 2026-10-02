@@ -85,6 +85,12 @@ func (a *App) mountWebAuth(mux *http.ServeMux) {
 		a.deleteCookie(w, stateCookie)
 
 		_, sid, err := a.loginViaOIDC(code, parsed, r.UserAgent())
+		if errors.Is(err, errNoTeam) {
+			// A cookie of an earlier login must not ride along.
+			a.clearSessionCookies(w)
+			a.renderPage(w, r, http.StatusForbidden, ui.NoTeam(a.cfg.AppName, a.postLogoutTarget()))
+			return
+		}
 		if err != nil {
 			log.Printf("[login] callback failed: %v", err)
 			http.Error(w, "login failed", 500)
