@@ -124,7 +124,7 @@ func (a *App) dispatchRPC(req *jsonRPCRequest, ctx *AuthContext) (any, *rpcError
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": toolDefs()}, nil
+		return map[string]any{"tools": toolDefs(a.cfg.RequireTeam)}, nil
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`

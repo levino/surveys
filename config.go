@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"sort"
@@ -44,6 +45,11 @@ type Config struct {
 	ZitadelTeamProjects   map[string]string
 	ZitadelMaintainerRole string
 
+	// RequireTeam: only members may log in — whoever has no team (no role
+	// in any ZITADEL_TEAM_PROJECTS project, no valid group) gets no session
+	// and no MCP token, and loses both once a refresh shows no team left.
+	RequireTeam bool
+
 	// Upper bound for how long provider tokens are used before the next use
 	// refreshes them (and re-derives the teams); expires_in may shorten it.
 	RefreshInterval time.Duration
@@ -80,6 +86,10 @@ func loadConfig() (Config, error) {
 		RefreshInterval:       envDuration("OIDC_REFRESH_INTERVAL", 10*time.Minute),
 		WebhookSigningKey:     strings.TrimSpace(os.Getenv("ZITADEL_WEBHOOK_SIGNING_KEY")),
 		OAuthClientHosts:      parseHostList(os.Getenv("OAUTH_CLIENT_HOSTS")),
+	}
+	var err error
+	if cfg.RequireTeam, err = envBool("OIDC_REQUIRE_TEAM", false); err != nil {
+		return cfg, err
 	}
 	if err := applyClientKey(&cfg, os.Getenv("OIDC_CLIENT_KEY"), strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))); err != nil {
 		return cfg, err
@@ -123,6 +133,21 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return time.Duration(n) * time.Second
 	}
 	return def
+}
+
+// envBool accepts true/false, 1/0, yes/no, on/off; unset = def. Anything
+// else stops the start — a typo must not silently open (or close) access.
+func envBool(key string, def bool) (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(key))); v {
+	case "":
+		return def, nil
+	case "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	default:
+		return def, fmt.Errorf("%s: %q is not a boolean (true/false)", key, v)
+	}
 }
 
 func envInt(key string, def int) int {

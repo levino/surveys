@@ -28,8 +28,14 @@ func toolErr(msg string) map[string]any {
 	return res
 }
 
-func toolDefs() []map[string]any {
+// toolDefs: requireTeam (OIDC_REQUIRE_TEAM) adds to the share tool that a
+// share alone does not let anyone log in.
+func toolDefs(requireTeam bool) []map[string]any {
 	str := map[string]any{"type": "string"}
+	shareDesc := "Gibt eine Umfrage einzelnen Personen per E-Mail-Adresse frei (add) oder nimmt Freigaben zurück (remove). Freigegebene Personen sehen die Umfrage und lesen die Ergebnisse, sobald sie sich mit dieser — verifizierten — Adresse anmelden; ändern/löschen dürfen sie nicht. Groß-/Kleinschreibung egal. Nur Ersteller oder Team-Maintainer. Gibt die Freigaben danach zurück."
+	if requireTeam {
+		shareDesc += " Achtung: Auf dieser Instanz dürfen sich nur Mitglieder eines Teams anmelden — wer keinem Team angehört, kann eine Freigabe nicht nutzen."
+	}
 	return []map[string]any{
 		{
 			"name":        "list_teams",
@@ -98,7 +104,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "share_form",
-			"description": "Gibt eine Umfrage einzelnen Personen per E-Mail-Adresse frei (add) oder nimmt Freigaben zurück (remove). Freigegebene Personen sehen die Umfrage und lesen die Ergebnisse, sobald sie sich mit dieser — verifizierten — Adresse anmelden; ändern/löschen dürfen sie nicht. Groß-/Kleinschreibung egal. Nur Ersteller oder Team-Maintainer. Gibt die Freigaben danach zurück.",
+			"description": shareDesc,
 			"inputSchema": map[string]any{
 				"type": "object", "required": []string{"id"},
 				"properties": map[string]any{
