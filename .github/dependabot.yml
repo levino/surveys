@@ -41,12 +41,22 @@
 #   Repos mit Luft im Kontingent ihre Gruppe sofort bekamen). 20 ist die Luft,
 #   die der Rueckstau braucht; im eingeschwungenen Zustand sind es drei.
 #
-# Warum `weekly` statt `daily`?
+# Warum `monthly`?
 #
-#   Nur die Routine-Version-Updates folgen dem `schedule`. Security-Updates
-#   haengen an den Dependabot-Alerts und werden ausgeloest, sobald ein Advisory
-#   erscheint -- die ignorieren `schedule` komplett. `weekly` beruhigt also nur
-#   das Alltagsrauschen, Sicherheitsfixes kommen weiterhin sofort.
+#   Jede rote Sammel-PR wurde bisher jede Woche durch eine neue ersetzt --
+#   rund 470 Dependabot-PRs in 90 Tagen ueber alle Repos, nur die Haelfte
+#   gemergt. Ein eigenes Intervall je Gruppe (etwa nur fuer `majors`) kennt
+#   Dependabot nicht: `schedule` gilt pro Eintrag, und zwei Eintraege fuer
+#   dasselbe Oekosystem und Verzeichnis sind verboten. Darum laeuft der ganze
+#   Eintrag monatlich. Security-Updates ignorieren `schedule` und kommen
+#   weiterhin sofort.
+#
+# Warum `update-types` in der Gruppe `security`?
+#
+#   Damit der Security-Sammel-PR keine Majors mehr enthaelt und automatisch
+#   durchgehen kann. Ein Sicherheitsfix, den es nur als Major gibt, kommt als
+#   eigener PR (Trailer `update-type: version-update:semver-major`) und wird
+#   von automerge.yml als `major` gelabelt.
 #
 # Nur der GITHUB_TOKEN der Repos, kein PAT, keine App, nichts im Cluster.
 version: 2
@@ -54,8 +64,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "04:00"
       timezone: Europe/Berlin
     labels:
@@ -77,6 +86,9 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
       # Ein Sammel-PR fuer ALLE Major-Updates dieses Oekosystems statt eines PRs
       # pro Abhaengigkeit -- ein Review-Paket statt eines Dutzends. Bleibt per
       # Label `major` vom Automerge ausgenommen.
@@ -89,8 +101,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "04:00"
       timezone: Europe/Berlin
     labels:
@@ -112,6 +123,9 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
       # Ein Sammel-PR fuer ALLE Major-Updates dieses Oekosystems statt eines PRs
       # pro Abhaengigkeit -- ein Review-Paket statt eines Dutzends. Bleibt per
       # Label `major` vom Automerge ausgenommen.
@@ -124,8 +138,7 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "04:00"
       timezone: Europe/Berlin
     labels:
@@ -147,6 +160,9 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
       # Ein Sammel-PR fuer ALLE Major-Updates dieses Oekosystems statt eines PRs
       # pro Abhaengigkeit -- ein Review-Paket statt eines Dutzends. Bleibt per
       # Label `major` vom Automerge ausgenommen.
@@ -156,11 +172,17 @@ updates:
           - "*"
         update-types:
           - major
+    ignore:
+      # templ: Dependabot kann `templ generate` nicht ausfuehren. Die
+      # generierten ui/*_templ.go veralten, und der Stale-Check in der CI
+      # schlaegt fehl (#32). templ von Hand aktualisieren: `go get` und
+      # `templ generate` in einem Commit.
+      - dependency-name: "github.com/a-h/templ"
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
   - package-ecosystem: docker
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "04:00"
       timezone: Europe/Berlin
     labels:
@@ -182,6 +204,9 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
       # Ein Sammel-PR fuer ALLE Major-Updates dieses Oekosystems statt eines PRs
       # pro Abhaengigkeit -- ein Review-Paket statt eines Dutzends. Bleibt per
       # Label `major` vom Automerge ausgenommen.
