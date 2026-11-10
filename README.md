@@ -293,6 +293,30 @@ e-mails), `list_forms` (own, team and shared-with-me surveys), `get_form`,
 `shared_with` is only shown to those who may manage the survey. Shares can
 also be edited on the survey's results page in the browser.
 
+### Teilnehmerbegrenzung (capacity)
+
+For registrations with a limited number of places (e.g. a factory tour for at
+most 20 people), `create_form` and `update_form` take:
+
+| Parameter            | Meaning |
+| -------------------- | ------- |
+| `capacity`           | Number of places, e.g. `20`. `0`/omitted = no limit. |
+| `capacity_tolerance` | Default `0`. How far the last registration may overshoot `capacity`. Never shown to participants. |
+| `capacity_field`     | Optional key of a `number` field holding the persons of one submission (e.g. `personen`); it must be a whole number ≥ 1, empty counts as 1. Without it every submission counts as 1. `""` removes it. |
+
+`places_taken` = sum of the persons over all submissions. A submission with
+*n* persons is accepted iff `places_taken < capacity` **and**
+`places_taken + n <= capacity + capacity_tolerance` — checked in the same
+`INSERT … SELECT` statement, so parallel submissions cannot overbook. With
+`capacity` 20 and tolerance 2: at 18 taken, 4 more fit (22); at 19 at most 3;
+at 20 nothing. The public form shows „18 von 20 Plätzen belegt – noch 2 Plätze
+frei.“; a registration that does not fit gets „Es sind nur noch X Plätze frei.“
+on the persons field (409); once `places_taken >= capacity` the page says
+„Ausgebucht – alle 20 Plätze sind belegt.“ instead of the form (200).
+`get_form`, `list_forms`, `create_form` and `update_form` return `capacity`,
+`capacity_tolerance`, `capacity_field` and `places_taken`; the results page
+shows the places taken.
+
 ## Build & deploy
 
 A multi-stage `Dockerfile` builds the CSS, cross-compiles a static CGO-free

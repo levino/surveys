@@ -33,6 +33,7 @@ type SubmissionsData struct {
 	Count      int
 	FieldCount int
 	Rows       []SubmissionRow
+	Places     string // "18 / 20" with Teilnehmerbegrenzung, else ""
 	CanManage  bool
 	SharedWith []string // only filled for CanManage
 }
@@ -62,6 +63,9 @@ type FormField struct {
 	Options   []string
 	Value     string
 	Error     string
+	// Count: the field holds the number of persons (capacity_field) —
+	// a whole number from 1.
+	Count bool
 }
 
 type FormView struct {
@@ -71,6 +75,11 @@ type FormView struct {
 	Error           string
 	TimeToken       string
 	Fields          []FormField
+	// Teilnehmerbegrenzung: CapacityNote („18 von 20 Plätzen belegt …“) is
+	// shown above the form; SoldOut replaces the form by SoldOutNote.
+	CapacityNote string
+	SoldOut      bool
+	SoldOutNote  string
 }
 
 type ConsentData struct {
@@ -391,6 +400,12 @@ templ Submissions(d SubmissionsData) {
 					<div class="stat-title">Einsendungen</div>
 					<div class="stat-value text-primary">{ itoa(d.Count) }</div>
 				</div>
+				if d.Places != "" {
+					<div class="stat">
+						<div class="stat-title">Plätze belegt</div>
+						<div class="stat-value">{ d.Places }</div>
+					</div>
+				}
 				<div class="stat">
 					<div class="stat-title">Felder</div>
 					<div class="stat-value">{ itoa(d.FieldCount) }</div>
@@ -443,23 +458,32 @@ templ FormPage(f FormView) {
 							@templ.Raw(f.DescriptionHTML)
 						</div>
 					}
-					if f.Error != "" {
-						<div class="alert alert-error text-sm"><span>{ f.Error }</span></div>
-					}
-					<form id="surveyform" method="post" autocomplete="off" class="space-y-3">
-						<div class="absolute -left-[9999px]" aria-hidden="true">
-							<label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"/></label>
-						</div>
-						<input type="hidden" name="t" value={ f.TimeToken }/>
-						for _, fld := range f.Fields {
-							@field(fld)
+					if f.SoldOut {
+						<div class="alert alert-warning mt-2" role="status"><span>{ f.SoldOutNote }</span></div>
+					} else {
+						if f.CapacityNote != "" {
+							<div class="alert alert-info text-sm" role="status"><span>{ f.CapacityNote }</span></div>
 						}
-						<button type="submit" class="btn btn-primary w-full">Absenden</button>
-					</form>
+						if f.Error != "" {
+							<div class="alert alert-error text-sm"><span>{ f.Error }</span></div>
+						}
+						<form id="surveyform" method="post" autocomplete="off" class="space-y-3">
+							<div class="absolute -left-[9999px]" aria-hidden="true">
+								<label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"/></label>
+							</div>
+							<input type="hidden" name="t" value={ f.TimeToken }/>
+							for _, fld := range f.Fields {
+								@field(fld)
+							}
+							<button type="submit" class="btn btn-primary w-full">Absenden</button>
+						</form>
+					}
 				</div>
 			</div>
 		</main>
-		@formValidation()
+		if !f.SoldOut {
+			@formValidation()
+		}
 	}
 }
 
@@ -495,7 +519,11 @@ templ field(f FormField) {
 			case "checkbox":
 				<input type="checkbox" name={ f.Key } value="on" class={ "checkbox", templ.KV("checkbox-error", f.Error != "") } required?={ f.Required } checked?={ f.Value == "true" }/>
 			case "number":
-				<input type="number" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } inputmode="decimal"/>
+				if f.Count {
+					<input type="number" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } min="1" step="1" inputmode="numeric"/>
+				} else {
+					<input type="number" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } inputmode="decimal"/>
+				}
 			case "email":
 				<input type="email" name={ f.Key } value={ f.Value } class={ "input input-bordered", templ.KV("input-error", f.Error != "") } required?={ f.Required } inputmode="email" autocapitalize="off" autocorrect="off" { optAttrs(f)... }/>
 			default:
@@ -704,6 +732,9 @@ templ Docs(appName, mcpURL string, requireTeam bool) {
 						</li>
 						<li><span class="font-mono">allow_multiple</span> — mehrere Einsendungen pro Person erlauben (Default: ja).</li>
 						<li><span class="font-mono">expires_at</span> — Ablaufdatum; danach keine Einsendungen mehr.</li>
+						<li><span class="font-mono">capacity</span> — Teilnehmerbegrenzung, z. B. 20 Plätze (0 = keine). Das Formular zeigt „18 von 20 Plätzen belegt“; ist alles belegt, steht dort „Ausgebucht“ statt des Formulars.</li>
+						<li><span class="font-mono">capacity_field</span> — optional: Schlüssel eines <span class="font-mono">number</span>-Feldes mit der Personenzahl pro Anmeldung (z. B. <span class="font-mono">personen</span>, ganze Zahl ab 1). Ohne zählt jede Einsendung als eine Person.</li>
+						<li><span class="font-mono">capacity_tolerance</span> — optional (Default 0): um wie viele Plätze die letzte Anmeldung überbuchen darf. Bei 20 Plätzen und Toleranz 2 geht bei 18 belegten noch eine Anmeldung für 4 Personen durch; ab 20 belegten ist Schluss.</li>
 						<li><span class="font-mono">status</span> — <span class="font-mono">active</span> oder <span class="font-mono">disabled</span>.</li>
 					</ul>
 				</div>

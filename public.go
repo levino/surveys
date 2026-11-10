@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -148,7 +149,53 @@ func submissionsView(a *App, ctx *AuthContext, form *Form, subs []*Submission) u
 		Slug: form.Ref, Title: form.Title, OwnerTeam: form.OwnerTeam, Status: form.Status,
 		PublicURL: form.publicURL(a.cfg.BaseURL), Count: len(subs), FieldCount: len(form.Fields),
 		Rows: rows, CanManage: ctx.canManage(form), SharedWith: sharesFor(ctx, form),
+		Places: placesSummary(a, form),
 	}
+}
+
+// placesSummary: "18 / 20" for the results page, "" without Teilnehmerbegrenzung.
+func placesSummary(a *App, form *Form) string {
+	if form.Capacity <= 0 {
+		return ""
+	}
+	taken, err := a.placesTaken(form)
+	if err != nil {
+		return ""
+	}
+	return strconv.Itoa(taken) + " / " + strconv.Itoa(form.Capacity)
+}
+
+// ---- Teilnehmerbegrenzung: texts on the public form ----------------------
+
+// capacityNote: „18 von 20 Plätzen belegt – noch 2 Plätze frei.“ (only
+// while taken < capacity; the tolerance is never mentioned).
+func capacityNote(taken, capacity int) string {
+	free := capacity - taken
+	of := "Plätzen"
+	if capacity == 1 {
+		of = "Platz"
+	}
+	rest := fmt.Sprintf("noch %d Plätze frei", free)
+	if free == 1 {
+		rest = "noch 1 Platz frei"
+	}
+	return fmt.Sprintf("%d von %d %s belegt – %s.", taken, capacity, of, rest)
+}
+
+func soldOutNote(capacity int) string {
+	if capacity == 1 {
+		return "Ausgebucht – der einzige Platz ist belegt. Anmeldungen sind nicht mehr möglich."
+	}
+	return fmt.Sprintf("Ausgebucht – alle %d Plätze sind belegt. Anmeldungen sind nicht mehr möglich.", capacity)
+}
+
+// tooManyPersons: field error when a submission does not fit; free is the
+// real maximum that would still be accepted (capacity+tolerance-taken).
+func tooManyPersons(free int) string {
+	if free == 1 {
+		return "Es ist nur noch 1 Platz frei."
+	}
+	return fmt.Sprintf("Es sind nur noch %d Plätze frei.", free)
 }
 
 func sharesFor(ctx *AuthContext, f *Form) []string {
@@ -179,6 +226,7 @@ func formView(a *App, form *Form, fieldErrs map[string]string, values map[string
 			Key: f.Key, Label: f.Label, Type: f.Type, HelpHTML: mdToHTML(f.Help),
 			Required: f.Required, MaxLength: f.MaxLength, Options: f.Options,
 			Value: values[f.Key], Error: fieldErrs[f.Key],
+			Count: f.Type == "number" && f.Key == form.CapacityField,
 		})
 	}
 	general := ""
@@ -189,6 +237,25 @@ func formView(a *App, form *Form, fieldErrs map[string]string, values map[string
 		AppName: a.cfg.AppName, Title: form.Title, DescriptionHTML: mdToHTML(form.Description),
 		Error: general, TimeToken: strconv.FormatInt(nowMs(), 10), Fields: fields,
 	}
+}
+
+// renderForm renders the public form, with the Teilnehmerbegrenzung hint —
+// or, once every place is taken, the „Ausgebucht“ notice instead of the form.
+func (a *App) renderForm(w http.ResponseWriter, r *http.Request, status int, form *Form, fieldErrs, values map[string]string) {
+	v := formView(a, form, fieldErrs, values)
+	if form.Capacity > 0 {
+		taken, err := a.placesTaken(form)
+		if err != nil {
+			http.Error(w, "error", 500)
+			return
+		}
+		if taken >= form.Capacity {
+			v.SoldOut, v.SoldOutNote = true, soldOutNote(form.Capacity)
+		} else {
+			v.CapacityNote = capacityNote(taken, form.Capacity)
+		}
+	}
+	a.renderPage(w, r, status, ui.FormPage(v))
 }
 
 func (a *App) handleFormGet(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +276,7 @@ func (a *App) handleFormGet(w http.ResponseWriter, r *http.Request) {
 		a.notice(w, r, 200, "Bereits ausgefüllt", "Sie haben dieses Formular bereits abgesendet. Vielen Dank!")
 		return
 	}
-	a.renderPage(w, r, http.StatusOK, ui.FormPage(formView(a, form, nil, map[string]string{})))
+	a.renderForm(w, r, http.StatusOK, form, nil, map[string]string{})
 }
 
 func (a *App) handleFormPost(w http.ResponseWriter, r *http.Request) {
@@ -252,11 +319,19 @@ func (a *App) handleFormPost(w http.ResponseWriter, r *http.Request) {
 	}
 	clean, fieldErrs := validateSubmission(form, raw)
 	if len(fieldErrs) > 0 {
-		a.renderPage(w, r, http.StatusBadRequest, ui.FormPage(formView(a, form, fieldErrs, raw)))
+		a.renderForm(w, r, http.StatusBadRequest, form, fieldErrs, raw)
 		return
 	}
 
-	if _, err := a.insertSubmission(form.ID, clean, r.UserAgent(), a.hashIP(ip)); err != nil {
+	if _, err := a.insertSubmission(form, clean, r.UserAgent(), a.hashIP(ip)); err == errCapacity {
+		// Sold out (renderForm shows „Ausgebucht“) or too many persons.
+		errs := map[string]string{}
+		if taken, err := a.placesTaken(form); err == nil && taken < form.Capacity && form.CapacityField != "" {
+			errs[form.CapacityField] = tooManyPersons(form.Capacity + form.CapacityTolerance - taken)
+		}
+		a.renderForm(w, r, http.StatusConflict, form, errs, raw)
+		return
+	} else if err != nil {
 		a.notice(w, r, 500, "Fehler", "Ihre Angaben konnten nicht gespeichert werden. Bitte später erneut versuchen.")
 		return
 	}

@@ -123,7 +123,12 @@ CREATE TABLE IF NOT EXISTS forms (
   expires_at     INTEGER,
   created_by     TEXT,
   created_at     INTEGER NOT NULL,
-  delete_at      INTEGER
+  delete_at      INTEGER,
+  -- Teilnehmerbegrenzung: 0 = off. capacity_field = key of a number field
+  -- holding the persons per submission ('' = each submission counts 1).
+  capacity           INTEGER NOT NULL DEFAULT 0,
+  capacity_tolerance INTEGER NOT NULL DEFAULT 0,
+  capacity_field     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS forms_owner_team ON forms(owner_team);
 
@@ -192,6 +197,10 @@ func (db *DB) migrate() error {
 	// Filled at the next login/refresh. forms.owner_team stays NOT NULL:
 	// '' means "no team", so existing rows need no table rebuild.
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN email TEXT`)
+	// Teilnehmerbegrenzung; existing surveys get 0/'' = no limit.
+	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN capacity INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN capacity_tolerance INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE forms ADD COLUMN capacity_field TEXT NOT NULL DEFAULT ''`)
 	for _, q := range []string{
 		`CREATE INDEX IF NOT EXISTS sessions_idp ON sessions(idp_session_id)`,
 		`CREATE INDEX IF NOT EXISTS oauth_tokens_idp ON oauth_tokens(idp_session_id)`,
