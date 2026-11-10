@@ -109,7 +109,7 @@ func TestPersonalSurveyAndEmailShares(t *testing.T) {
 	if sw, _ := created["shared_with"].([]any); len(sw) != 1 || sw[0] != "hartmann-nordstemmen@t-online.de" {
 		t.Fatalf("shared_with must be normalised: %v", created["shared_with"])
 	}
-	if _, err := app.insertSubmission(formID, map[string]string{"termin": "Samstag"}, "ua", "ip"); err != nil {
+	if _, err := app.insertSubmission(&Form{ID: formID}, map[string]string{"termin": "Samstag"}, "ua", "ip"); err != nil {
 		t.Fatal(err)
 	}
 	var subID string

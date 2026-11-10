@@ -46,6 +46,14 @@ type Form struct {
 	// DeleteAt: the survey and ALL its submissions are purged after this
 	// point (data minimisation). 0 = keep until deleted by hand.
 	DeleteAt int64 `json:"delete_at,omitempty"`
+	// Teilnehmerbegrenzung: Capacity > 0 caps the places (sum of persons
+	// over all submissions, see placesTaken). A submission is accepted while
+	// taken < Capacity and taken+n <= Capacity+CapacityTolerance.
+	// CapacityField: key of a number field holding the persons of one
+	// submission; "" = every submission counts as 1.
+	Capacity          int    `json:"capacity,omitempty"`
+	CapacityTolerance int    `json:"capacity_tolerance,omitempty"`
+	CapacityField     string `json:"capacity_field,omitempty"`
 	// SharedWith: e-mail addresses (lowercase) with read access, loaded
 	// with the form. Shown only to those who may manage it.
 	SharedWith []string `json:"-"`
@@ -97,6 +105,41 @@ func validateFieldDefs(fields []FieldDef) error {
 	return nil
 }
 
+// validateCapacity checks the Teilnehmerbegrenzung settings against fields.
+func validateCapacity(fields []FieldDef, capacity, tolerance int, field string) error {
+	if capacity < 0 {
+		return fmt.Errorf("capacity darf nicht negativ sein (0 = keine Begrenzung)")
+	}
+	if tolerance < 0 {
+		return fmt.Errorf("capacity_tolerance darf nicht negativ sein")
+	}
+	if field == "" {
+		return nil
+	}
+	for _, f := range fields {
+		if f.Key == field {
+			if f.Type != "number" {
+				return fmt.Errorf("capacity_field %q muss ein Feld vom Typ number sein, ist aber %s", field, f.Type)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("capacity_field %q ist kein Feld dieser Umfrage (Feld anlegen oder capacity_field auf \"\" setzen)", field)
+}
+
+// personsOf: how many places one submission takes — the value of the
+// capacity field (validated as a whole number >= 1), else 1.
+func personsOf(form *Form, values map[string]string) int {
+	if form.CapacityField == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(values[form.CapacityField])
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
 func validateSubmission(form *Form, raw map[string]string) (map[string]string, map[string]string) {
 	const hardMax = 10000
 	out := map[string]string{}
@@ -136,6 +179,13 @@ func validateSubmission(form *Form, raw map[string]string) (map[string]string, m
 				continue
 			}
 		case "number":
+			if f.Key == form.CapacityField {
+				if n, err := strconv.Atoi(v); err != nil || n < 1 {
+					errs[f.Key] = fmt.Sprintf("%s muss eine ganze Zahl ab 1 sein.", f.Label)
+					continue
+				}
+				break
+			}
 			if _, err := strconv.ParseFloat(v, 64); err != nil {
 				errs[f.Key] = fmt.Sprintf("%s muss eine Zahl sein.", f.Label)
 				continue
@@ -161,6 +211,10 @@ type createFormInput struct {
 	AllowMultiple bool
 	DeleteAt      int64
 	SharedWith    []string
+
+	Capacity          int
+	CapacityTolerance int
+	CapacityField     string
 }
 
 func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
@@ -169,6 +223,10 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 	}
 	in.OwnerTeam = strings.TrimSpace(in.OwnerTeam)
 	if err := validateFieldDefs(in.Fields); err != nil {
+		return nil, err
+	}
+	in.CapacityField = strings.TrimSpace(in.CapacityField)
+	if err := validateCapacity(in.Fields, in.Capacity, in.CapacityTolerance, in.CapacityField); err != nil {
 		return nil, err
 	}
 	shares, err := normalizeShareEmails(in.SharedWith)
@@ -188,6 +246,10 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 		CreatedBy:     createdBy,
 		DeleteAt:      in.DeleteAt,
 		CreatedAt:     nowMs(),
+
+		Capacity:          in.Capacity,
+		CapacityTolerance: in.CapacityTolerance,
+		CapacityField:     in.CapacityField,
 	}
 	am := 0
 	if f.AllowMultiple {
@@ -207,9 +269,10 @@ func (a *App) createForm(in createFormInput, createdBy string) (*Form, error) {
 		f.Slug = randomSlug()
 		f.Ref = a.db.uniqueRef(slugify(refBase), "")
 		_, err := a.db.Exec(
-			`INSERT INTO forms(id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO forms(id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at, capacity, capacity_tolerance, capacity_field)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			f.ID, f.Slug, f.Ref, f.Title, nullStr(f.Description), string(fieldsJSON), f.OwnerTeam, f.Status, am, msPtr(f.ExpiresAt), nullStr(f.CreatedBy), f.CreatedAt, msPtr(f.DeleteAt),
+			f.Capacity, f.CapacityTolerance, f.CapacityField,
 		)
 		if err == nil {
 			if err := a.addShares(f.ID, shares, createdBy); err != nil {
@@ -234,7 +297,8 @@ func scanForm(s interface{ Scan(...any) error }) (*Form, error) {
 		am                   int
 		expires, deleteAt    sql.NullInt64
 	)
-	if err := s.Scan(&f.ID, &f.Slug, &ref, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt, &deleteAt); err != nil {
+	if err := s.Scan(&f.ID, &f.Slug, &ref, &f.Title, &desc, &fields, &f.OwnerTeam, &f.Status, &am, &expires, &createdBy, &f.CreatedAt, &deleteAt,
+		&f.Capacity, &f.CapacityTolerance, &f.CapacityField); err != nil {
 		return nil, err
 	}
 	f.Ref, f.Description, f.CreatedBy = ref.String, desc.String, createdBy.String
@@ -245,7 +309,7 @@ func scanForm(s interface{ Scan(...any) error }) (*Form, error) {
 	return &f, nil
 }
 
-const formCols = `id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at`
+const formCols = `id, slug, ref, title, description, fields, owner_team, status, allow_multiple, expires_at, created_by, created_at, delete_at, capacity, capacity_tolerance, capacity_field`
 
 // notDue: SQL fragment hiding surveys whose delete_at has passed.
 const notDue = `(delete_at IS NULL OR delete_at = 0 OR delete_at > ?)`
@@ -431,6 +495,10 @@ type formPatch struct {
 	ExpiresAt   *int64
 	DeleteAt    *int64
 	Fields      *[]FieldDef
+
+	Capacity          *int
+	CapacityTolerance *int
+	CapacityField     *string
 }
 
 func (a *App) updateForm(id string, p formPatch) (*Form, error) {
@@ -468,10 +536,23 @@ func (a *App) updateForm(id string, p formPatch) (*Form, error) {
 		}
 		f.Fields = *p.Fields
 	}
+	if p.Capacity != nil {
+		f.Capacity = *p.Capacity
+	}
+	if p.CapacityTolerance != nil {
+		f.CapacityTolerance = *p.CapacityTolerance
+	}
+	if p.CapacityField != nil {
+		f.CapacityField = strings.TrimSpace(*p.CapacityField)
+	}
+	if err := validateCapacity(f.Fields, f.Capacity, f.CapacityTolerance, f.CapacityField); err != nil {
+		return nil, err
+	}
 	fieldsJSON, _ := json.Marshal(f.Fields)
 	_, err = a.db.Exec(
-		`UPDATE forms SET title=?, description=?, ref=?, status=?, expires_at=?, fields=?, delete_at=? WHERE id=?`,
-		f.Title, nullStr(f.Description), f.Ref, f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), msPtr(f.DeleteAt), id,
+		`UPDATE forms SET title=?, description=?, ref=?, status=?, expires_at=?, fields=?, delete_at=?, capacity=?, capacity_tolerance=?, capacity_field=? WHERE id=?`,
+		f.Title, nullStr(f.Description), f.Ref, f.Status, msPtr(f.ExpiresAt), string(fieldsJSON), msPtr(f.DeleteAt),
+		f.Capacity, f.CapacityTolerance, f.CapacityField, id,
 	)
 	if err != nil {
 		return nil, err
@@ -504,14 +585,59 @@ func (a *App) countSubmissions(formID string) (int, error) {
 	return n, err
 }
 
-func (a *App) insertSubmission(formID string, values map[string]string, ua, ipHash string) (*Submission, error) {
+// takenSQL: SQL expression (plus args) for the places taken by the
+// submissions of form ? — the sum of the capacity field (a missing, empty or
+// non-positive value counts 1), or the number of submissions without one.
+// The args are followed by the form id.
+func takenSQL(field string) (string, []any) {
+	if field == "" {
+		return `(SELECT COUNT(*) FROM submissions WHERE form_id = ?)`, nil
+	}
+	// field matches keyRe ([a-z0-9_]+), so the JSON path needs no quoting.
+	return `(SELECT COALESCE(SUM(MAX(1, COALESCE(CAST(json_extract(data, ?) AS INTEGER), 1))), 0) FROM submissions WHERE form_id = ?)`,
+		[]any{"$." + field}
+}
+
+// placesTaken: how many places of form are taken (see takenSQL).
+func (a *App) placesTaken(form *Form) (int, error) {
+	expr, args := takenSQL(form.CapacityField)
+	var n int
+	err := a.db.QueryRow(`SELECT `+expr, append(args, form.ID)...).Scan(&n)
+	return n, err
+}
+
+// errCapacity: the submission does not fit (insertSubmission).
+var errCapacity = fmt.Errorf("capacity")
+
+func (a *App) insertSubmission(form *Form, values map[string]string, ua, ipHash string) (*Submission, error) {
 	valuesJSON, _ := json.Marshal(values)
-	s := &Submission{ID: genID("sub"), FormID: formID, Values: values, CreatedAt: nowMs()}
-	_, err := a.db.Exec(
-		`INSERT INTO submissions(id, form_id, data, user_agent, ip_hash, created_at) VALUES (?,?,?,?,?,?)`,
-		s.ID, formID, string(valuesJSON), nullStr(ua), nullStr(ipHash), s.CreatedAt,
+	s := &Submission{ID: genID("sub"), FormID: form.ID, Values: values, CreatedAt: nowMs()}
+	if form.Capacity <= 0 {
+		_, err := a.db.Exec(
+			`INSERT INTO submissions(id, form_id, data, user_agent, ip_hash, created_at) VALUES (?,?,?,?,?,?)`,
+			s.ID, form.ID, string(valuesJSON), nullStr(ua), nullStr(ipHash), s.CreatedAt,
+		)
+		return s, err
+	}
+	// Check and insert in ONE statement, so parallel submissions cannot
+	// overbook: taken < capacity AND taken + n <= capacity + tolerance.
+	expr, targs := takenSQL(form.CapacityField)
+	args := []any{s.ID, form.ID, string(valuesJSON), nullStr(ua), nullStr(ipHash), s.CreatedAt}
+	args = append(args, targs...)
+	args = append(args, form.ID, form.Capacity, personsOf(form, values), form.Capacity+form.CapacityTolerance)
+	res, err := a.db.Exec(
+		`INSERT INTO submissions(id, form_id, data, user_agent, ip_hash, created_at)
+		 SELECT ?,?,?,?,?,? FROM (SELECT `+expr+` AS taken)
+		 WHERE taken < ? AND taken + ? <= ?`,
+		args...,
 	)
-	return s, err
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, errCapacity
+	}
+	return s, nil
 }
 
 func (a *App) listSubmissions(formID string, since int64, limit, offset int) ([]*Submission, error) {

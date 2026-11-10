@@ -63,6 +63,12 @@ CSS. See `README.md` for the user-facing overview and configuration.
   Schema changes: add the column to `schema` AND an idempotent `ALTER TABLE`
   in `migrate()` (existing databases), then extend `formCols`/`scanForm`.
   Indexes on ALTERed columns belong in `migrate()`, not in `schema`.
+- **Teilnehmerbegrenzung** (`forms.go`): `capacity`, `capacity_tolerance`,
+  `capacity_field` on `forms`. `placesTaken`/`takenSQL` sum the capacity
+  field over all submissions (else count them); `insertSubmission` checks
+  and inserts in one `INSERT … SELECT … WHERE` (`errCapacity` when it does
+  not fit) — keep it a single statement, it is what prevents overbooking.
+  Texts for the public form live in `public.go` (`capacityNote` etc.).
 - **Markdown** (`md.go`): goldmark renders description + field `help`; raw HTML
   is escaped (not unsafe).
 

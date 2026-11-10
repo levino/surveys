@@ -32,6 +32,9 @@ func toolErr(msg string) map[string]any {
 // share alone does not let anyone log in.
 func toolDefs(requireTeam bool) []map[string]any {
 	str := map[string]any{"type": "string"}
+	capacity := map[string]any{"type": "integer", "minimum": 0, "description": "Teilnehmerbegrenzung (z. B. für Anmeldungen): Anzahl der Plätze, z. B. 20. 0 oder weglassen = keine Begrenzung. Das öffentliche Formular zeigt „18 von 20 Plätzen belegt – noch 2 Plätze frei.“; sind alle Plätze belegt, zeigt es „Ausgebucht“ statt des Formulars und nimmt nichts mehr an."}
+	capacityTolerance := map[string]any{"type": "integer", "minimum": 0, "description": "Optional (Default 0): um wie viele Plätze die letzte Anmeldung capacity überschreiten darf. Regel: eine Einsendung mit n Personen wird angenommen, wenn belegt < capacity UND belegt + n <= capacity + capacity_tolerance. Beispiel capacity 20, Toleranz 2: bei 18 belegt gehen noch 4 Personen (22), bei 19 höchstens 3, ab 20 nichts mehr. Die Toleranz wird Teilnehmenden nicht angezeigt."}
+	capacityField := map[string]any{"type": "string", "description": "Optional: key eines Feldes vom Typ number, das die Personenzahl einer Einsendung enthält (z. B. \"personen\" — „Wie viele Personen meldest du an?“). Dann zählt jede Einsendung mit diesem Wert (ganze Zahl ab 1; leer = 1), sonst zählt jede Einsendung als 1 Platz. Das Feld muss in fields existieren; am besten required. \"\" entfernt es (update_form)."}
 	shareDesc := "Gibt eine Umfrage einzelnen Personen per E-Mail-Adresse frei (add) oder nimmt Freigaben zurück (remove). Freigegebene Personen sehen die Umfrage und lesen die Ergebnisse, sobald sie sich mit dieser — verifizierten — Adresse anmelden; ändern/löschen dürfen sie nicht. Groß-/Kleinschreibung egal. Nur Ersteller oder Team-Maintainer. Gibt die Freigaben danach zurück."
 	if requireTeam {
 		shareDesc += " Achtung: Auf dieser Instanz dürfen sich nur Mitglieder eines Teams anmelden — wer keinem Team angehört, kann eine Freigabe nicht nutzen."
@@ -44,19 +47,22 @@ func toolDefs(requireTeam bool) []map[string]any {
 		},
 		{
 			"name":        "create_form",
-			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare Teilnahme-URL zurück (kein Login nötig, noindex). Mit owner_team gehört die Umfrage dem Team: alle Mitglieder sehen sie und lesen die Ergebnisse. Ohne owner_team gehört sie nur dir. In beiden Fällen geben shared_with-Adressen einzelnen Personen Lesezugriff (sie melden sich mit dieser, verifizierten E-Mail-Adresse an; ein Konto vorab ist nicht nötig). Ändern, löschen und Freigaben bearbeiten darf nur, wer sie angelegt hat (oder ein Maintainer des Teams). Datensparsamkeit: delete_at setzt, wann Umfrage und Einsendungen automatisch verschwinden.",
+			"description": "Legt eine neue Umfrage/ein Formular an und gibt die öffentliche, nicht erratbare Teilnahme-URL zurück (kein Login nötig, noindex). Mit owner_team gehört die Umfrage dem Team: alle Mitglieder sehen sie und lesen die Ergebnisse. Ohne owner_team gehört sie nur dir. In beiden Fällen geben shared_with-Adressen einzelnen Personen Lesezugriff (sie melden sich mit dieser, verifizierten E-Mail-Adresse an; ein Konto vorab ist nicht nötig). Ändern, löschen und Freigaben bearbeiten darf nur, wer sie angelegt hat (oder ein Maintainer des Teams). Datensparsamkeit: delete_at setzt, wann Umfrage und Einsendungen automatisch verschwinden. Für Anmeldungen mit begrenzten Plätzen (z. B. Betriebsbesichtigung, max. 20 Personen, eine Anmeldung für mehrere Personen): capacity, optional capacity_field (number-Feld mit der Personenzahl) und capacity_tolerance.",
 			"inputSchema": map[string]any{
 				"type":     "object",
 				"required": []string{"title", "fields"},
 				"properties": map[string]any{
-					"title":          str,
-					"description":    str,
-					"ref":            map[string]any{"type": "string", "description": "Optionaler lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ohne Angabe aus dem Titel erzeugt."},
-					"owner_team":     map[string]any{"type": "string", "description": "Optional: Team-Slug (z. B. die Klasse), dem die Umfrage gehört — eines aus list_teams. Weglassen = persönliche Umfrage, nur für dich und die Freigaben."},
-					"shared_with":    map[string]any{"type": "array", "items": str, "description": "Optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und ihre Ergebnisse lesen dürfen (nicht ändern). Groß-/Kleinschreibung egal."},
-					"expires_at":     map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr; Ergebnisse bleiben bis delete_at lesbar."},
-					"delete_at":      map[string]any{"type": "string", "description": "Löschdatum (RFC3339 oder YYYY-MM-DD): danach werden Umfrage UND alle Einsendungen automatisch gelöscht. Ohne Angabe gilt die Standard-Aufbewahrung der Instanz (siehe list_teams)."},
-					"allow_multiple": map[string]any{"type": "boolean", "description": "Mehrfach-Einsendungen pro Person erlauben (Default true)"},
+					"title":              str,
+					"description":        str,
+					"ref":                map[string]any{"type": "string", "description": "Optionaler lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ohne Angabe aus dem Titel erzeugt."},
+					"owner_team":         map[string]any{"type": "string", "description": "Optional: Team-Slug (z. B. die Klasse), dem die Umfrage gehört — eines aus list_teams. Weglassen = persönliche Umfrage, nur für dich und die Freigaben."},
+					"shared_with":        map[string]any{"type": "array", "items": str, "description": "Optional: E-Mail-Adressen einzelner Personen, die die Umfrage sehen und ihre Ergebnisse lesen dürfen (nicht ändern). Groß-/Kleinschreibung egal."},
+					"expires_at":         map[string]any{"type": "string", "description": "Optionales Ablaufdatum (RFC3339 oder YYYY-MM-DD). Danach keine Einsendungen mehr; Ergebnisse bleiben bis delete_at lesbar."},
+					"delete_at":          map[string]any{"type": "string", "description": "Löschdatum (RFC3339 oder YYYY-MM-DD): danach werden Umfrage UND alle Einsendungen automatisch gelöscht. Ohne Angabe gilt die Standard-Aufbewahrung der Instanz (siehe list_teams)."},
+					"allow_multiple":     map[string]any{"type": "boolean", "description": "Mehrfach-Einsendungen pro Person erlauben (Default true)"},
+					"capacity":           capacity,
+					"capacity_tolerance": capacityTolerance,
+					"capacity_field":     capacityField,
 					"fields": map[string]any{
 						"type":        "array",
 						"description": "Felddefinitionen",
@@ -79,26 +85,29 @@ func toolDefs(requireTeam bool) []map[string]any {
 		},
 		{
 			"name":        "list_forms",
-			"description": "Listet alle Umfragen, die der Nutzer sehen darf: die seiner Teams, seine eigenen ohne Team (owner_team \"\") und die an seine E-Mail-Adresse freigegebenen. can_manage sagt, ob der Nutzer sie ändern/löschen darf; nur dann steht shared_with (die Freigaben) dabei.",
+			"description": "Listet alle Umfragen, die der Nutzer sehen darf: die seiner Teams, seine eigenen ohne Team (owner_team \"\") und die an seine E-Mail-Adresse freigegebenen. can_manage sagt, ob der Nutzer sie ändern/löschen darf; nur dann steht shared_with (die Freigaben) dabei. capacity/capacity_tolerance/capacity_field zeigen eine Teilnehmerbegrenzung (capacity 0 = keine), places_taken die belegten Plätze (Summe der Personenzahl über alle Einsendungen, ohne capacity_field = Anzahl Einsendungen).",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
 			"name":        "get_form",
-			"description": "Liest eine Umfrage inkl. Felddefinition und Anzahl Einsendungen (und, wer sie verwalten darf, ihre Freigaben shared_with).",
+			"description": "Liest eine Umfrage inkl. Felddefinition und Anzahl Einsendungen (und, wer sie verwalten darf, ihre Freigaben shared_with). Mit Teilnehmerbegrenzung: capacity (Plätze, 0 = keine Begrenzung), capacity_tolerance, capacity_field und places_taken (belegte Plätze = Summe des capacity_field über alle Einsendungen, sonst Anzahl Einsendungen).",
 			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str}},
 		},
 		{
 			"name":        "update_form",
-			"description": "Ändert eine Umfrage (Titel, Beschreibung, Status active/disabled, Ablauf- und Löschdatum, Felder). Nur Ersteller oder Team-Maintainer.",
+			"description": "Ändert eine Umfrage (Titel, Beschreibung, Status active/disabled, Ablauf- und Löschdatum, Felder, Teilnehmerbegrenzung capacity/capacity_tolerance/capacity_field). Nur angegebene Werte ändern sich; capacity 0 hebt die Begrenzung auf. Wer fields ändert, muss das capacity_field behalten (oder capacity_field \"\" setzen). Bereits eingegangene Einsendungen bleiben, auch wenn eine neue capacity darunter liegt. Nur Ersteller oder Team-Maintainer.",
 			"inputSchema": map[string]any{
 				"type": "object", "required": []string{"id"},
 				"properties": map[string]any{
 					"id": str, "title": str, "description": str,
-					"ref":        map[string]any{"type": "string", "description": "Lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ändert bestehende Ergebnis-Links."},
-					"status":     map[string]any{"type": "string", "enum": []string{"active", "disabled"}},
-					"expires_at": map[string]any{"type": "string", "description": "RFC3339/YYYY-MM-DD, oder \"\" zum Entfernen"},
-					"delete_at":  map[string]any{"type": "string", "description": "Löschdatum RFC3339/YYYY-MM-DD; \"\" entfernt es (nur ohne Standard-Aufbewahrung möglich)"},
-					"fields":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+					"ref":                map[string]any{"type": "string", "description": "Lesbarer Slug für die Ergebnis-Seite (/surveys/<ref>). Ändert bestehende Ergebnis-Links."},
+					"status":             map[string]any{"type": "string", "enum": []string{"active", "disabled"}},
+					"expires_at":         map[string]any{"type": "string", "description": "RFC3339/YYYY-MM-DD, oder \"\" zum Entfernen"},
+					"delete_at":          map[string]any{"type": "string", "description": "Löschdatum RFC3339/YYYY-MM-DD; \"\" entfernt es (nur ohne Standard-Aufbewahrung möglich)"},
+					"fields":             map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+					"capacity":           capacity,
+					"capacity_tolerance": capacityTolerance,
+					"capacity_field":     capacityField,
 				},
 			},
 		},
@@ -180,6 +189,10 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			AllowMultiple *bool      `json:"allow_multiple"`
 			Fields        []FieldDef `json:"fields"`
 			SharedWith    []string   `json:"shared_with"`
+
+			Capacity          int    `json:"capacity"`
+			CapacityTolerance int    `json:"capacity_tolerance"`
+			CapacityField     string `json:"capacity_field"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
@@ -204,17 +217,18 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			Title: in.Title, Description: in.Description, Ref: in.Ref, Fields: in.Fields,
 			OwnerTeam: in.OwnerTeam, ExpiresAt: expires, AllowMultiple: allowMultiple, DeleteAt: deleteAt,
 			SharedWith: in.SharedWith,
+			Capacity:   in.Capacity, CapacityTolerance: in.CapacityTolerance, CapacityField: in.CapacityField,
 		}, ctx.User.GitHubID)
 		if err != nil {
 			return nil, err
 		}
-		return toolJSON(map[string]any{
+		return toolJSON(a.withCapacity(form, map[string]any{
 			"id": form.ID, "slug": form.Slug, "ref": form.Ref,
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 			"expires_at": isoOrEmpty(form.ExpiresAt), "delete_at": isoOrEmpty(form.DeleteAt),
 			"created_by": form.CreatedBy, "can_manage": true, "shared_with": form.SharedWith,
-		}), nil
+		})), nil
 
 	case "list_forms":
 		forms, err := a.listVisibleForms(ctx)
@@ -224,13 +238,13 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		out := make([]map[string]any, 0, len(forms))
 		for _, f := range forms {
 			n, _ := a.countSubmissions(f.ID)
-			out = append(out, withShares(ctx, f, map[string]any{
+			out = append(out, withShares(ctx, f, a.withCapacity(f, map[string]any{
 				"id": f.ID, "title": f.Title, "slug": f.Slug, "ref": f.Ref,
 				"url": f.publicURL(a.cfg.BaseURL), "results_url": f.resultsURL(a.cfg.BaseURL),
 				"owner_team": f.OwnerTeam, "status": f.Status, "submissions": n,
 				"expires_at": isoOrEmpty(f.ExpiresAt), "delete_at": isoOrEmpty(f.DeleteAt),
 				"created_at": isoMs(f.CreatedAt), "created_by": f.CreatedBy, "can_manage": ctx.canManage(f),
-			}))
+			})))
 		}
 		return toolJSON(map[string]any{"forms": out}), nil
 
@@ -240,14 +254,14 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			return a.formAccessErr(err)
 		}
 		n, _ := a.countSubmissions(form.ID)
-		return toolJSON(withShares(ctx, form, map[string]any{
+		return toolJSON(withShares(ctx, form, a.withCapacity(form, map[string]any{
 			"id": form.ID, "title": form.Title, "description": form.Description, "slug": form.Slug, "ref": form.Ref,
 			"url": form.publicURL(a.cfg.BaseURL), "results_url": form.resultsURL(a.cfg.BaseURL),
 			"owner_team": form.OwnerTeam, "status": form.Status,
 			"allow_multiple": form.AllowMultiple, "expires_at": isoOrEmpty(form.ExpiresAt),
 			"delete_at": isoOrEmpty(form.DeleteAt), "created_by": form.CreatedBy, "can_manage": ctx.canManage(form),
 			"fields": form.Fields, "submissions": n, "created_at": isoMs(form.CreatedAt),
-		})), nil
+		}))), nil
 
 	case "update_form":
 		form, err := a.requireManagedForm(args, ctx)
@@ -262,11 +276,18 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 			ExpiresAt   *string     `json:"expires_at"`
 			DeleteAt    *string     `json:"delete_at"`
 			Fields      *[]FieldDef `json:"fields"`
+
+			Capacity          *int    `json:"capacity"`
+			CapacityTolerance *int    `json:"capacity_tolerance"`
+			CapacityField     *string `json:"capacity_field"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return nil, err
 		}
-		patch := formPatch{Title: in.Title, Description: in.Description, Ref: in.Ref, Status: in.Status, Fields: in.Fields}
+		patch := formPatch{
+			Title: in.Title, Description: in.Description, Ref: in.Ref, Status: in.Status, Fields: in.Fields,
+			Capacity: in.Capacity, CapacityTolerance: in.CapacityTolerance, CapacityField: in.CapacityField,
+		}
 		if in.ExpiresAt != nil {
 			ms, err := parseExpiry(*in.ExpiresAt)
 			if err != nil {
@@ -285,7 +306,7 @@ func (a *App) callTool(name string, args json.RawMessage, ctx *AuthContext) (map
 		if err != nil {
 			return toolErr(err.Error()), nil
 		}
-		return toolJSON(map[string]any{"id": updated.ID, "status": updated.Status, "title": updated.Title, "expires_at": isoOrEmpty(updated.ExpiresAt), "delete_at": isoOrEmpty(updated.DeleteAt)}), nil
+		return toolJSON(a.withCapacity(updated, map[string]any{"id": updated.ID, "status": updated.Status, "title": updated.Title, "expires_at": isoOrEmpty(updated.ExpiresAt), "delete_at": isoOrEmpty(updated.DeleteAt)})), nil
 
 	case "share_form":
 		form, err := a.requireManagedForm(args, ctx)
@@ -451,6 +472,17 @@ func (a *App) formByIDForUser(id string, ctx *AuthContext) (*Form, error) {
 func withShares(ctx *AuthContext, f *Form, out map[string]any) map[string]any {
 	if ctx.canManage(f) {
 		out["shared_with"] = f.SharedWith
+	}
+	return out
+}
+
+// withCapacity adds the Teilnehmerbegrenzung and the places taken.
+func (a *App) withCapacity(f *Form, out map[string]any) map[string]any {
+	out["capacity"] = f.Capacity
+	out["capacity_tolerance"] = f.CapacityTolerance
+	out["capacity_field"] = f.CapacityField
+	if taken, err := a.placesTaken(f); err == nil {
+		out["places_taken"] = taken
 	}
 	return out
 }
